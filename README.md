@@ -1,6 +1,6 @@
-# CodeTogether v2.4 — Live Mesh Developer Workspace
+# CodeTogether — Real-Time Collaborative Coding Platform
 
-An enterprise-grade, real-time collaborative coding and architecture workspace with Monaco Editor, WebRTC audio/video mesh, interactive HTML5 canvas doodle board, and MongoDB version history persistence.
+An enterprise-grade, real-time collaborative coding and architecture workspace with Monaco Editor, Judge0 sandboxed code execution, WebRTC audio/video mesh, interactive HTML5 canvas doodle board, and MongoDB version history persistence.
 
 ---
 
