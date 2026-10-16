@@ -8,21 +8,14 @@ export default {
     extend: {
       colors: {
         mesh: {
-          bg: '#0A0D14',
-          surface: '#101522',
-          surface2: '#161C2C',
-          card: '#121724',
-          cardHover: '#182032',
-          border: '#1E2638',
-          borderLight: '#2A364E',
-          cyan: '#38BDF8',
-          cyanGlow: '#00F2FE',
-          emerald: '#10B981',
-          emeraldGlow: '#059669',
-          amber: '#F59E0B',
-          purple: '#8B5CF6',
-          rose: '#F43F5E',
-          muted: '#818DA4',
+          bg: '#101318',
+          surface: '#171B22',
+          surface2: '#1D232D',
+          border: '#303744',
+          primary: '#7C9CFF',
+          secondary: '#66D9C1',
+          text: '#F1F4F9',
+          muted: '#9AA5B5',
         }
       },
       fontFamily: {

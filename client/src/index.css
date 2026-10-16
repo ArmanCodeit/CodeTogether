@@ -6,6 +6,11 @@
   color-scheme: dark;
 }
 
+body {
+  background-color: #101318;
+  color: #F1F4F9;
+}
+
 /* Custom Sleek Dark Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
@@ -13,36 +18,25 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: #0B0F17;
+  background: #101318;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1E2638;
+  background: #303744;
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #2D3A54;
+  background: #3d4657;
 }
 
 /* Speaking Halo glow */
 .speaking-glow {
-  box-shadow: 0 0 0 2px #10B981, 0 0 20px rgba(16, 185, 129, 0.35);
-}
-
-.radar-ping {
-  animation: radar 2s cubic-bezier(0, 0, 0.2, 1) infinite;
-}
-
-@keyframes radar {
-  75%, 100% {
-    transform: scale(2.4);
-    opacity: 0;
-  }
+  box-shadow: 0 0 0 2px #66D9C1, 0 0 20px rgba(102, 217, 193, 0.35);
 }
 
 /* Dot grid for Whiteboard Canvas */
 .canvas-grid {
-  background-image: radial-gradient(rgba(255, 255, 255, 0.1) 1px, transparent 1px);
+  background-image: radial-gradient(rgba(241, 244, 249, 0.08) 1px, transparent 1px);
   background-size: 24px 24px;
 }

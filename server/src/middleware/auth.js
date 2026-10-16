@@ -45,22 +45,15 @@ export const optionalAuth = async (req, res, next) => {
           return next();
         }
       } catch (err) {
-        // Token invalid, fall back to default user
+        // Token invalid, leave req.user as null
       }
     }
 
-    // Default demo user fallback for seamless development & pairing
-    const defaultUser = await storage.findUserById('usr_89f02c');
-    req.user = defaultUser || {
-      _id: 'usr_89f02c',
-      id: 'usr_89f02c',
-      name: 'Sarah Connor',
-      email: 'sarah@codetogether.dev',
-      avatar: 'SC',
-      role: 'architect',
-    };
+    // No hardcoded dummy users - guests are real anonymous participants
+    req.user = null;
     next();
   } catch (error) {
+    req.user = null;
     next();
   }
 };

@@ -7,7 +7,7 @@ export const AuthProvider = ({ children }) => {
   const [token, setToken] = useState(localStorage.getItem('cdt_token') || '');
   const [loading, setLoading] = useState(true);
 
-  // Initialize and verify user
+  // Initialize and verify user from backend
   useEffect(() => {
     const initAuth = async () => {
       if (token) {
@@ -20,21 +20,36 @@ export const AuthProvider = ({ children }) => {
             setUser(data.user);
             setLoading(false);
             return;
+          } else {
+            // Token invalid or expired
+            localStorage.removeItem('cdt_token');
+            setToken('');
           }
         } catch (err) {
-          console.warn('Auth check error, falling back to local demo profile:', err);
+          console.warn('Auth check error:', err);
         }
       }
 
-      // Default demo profile matching screenshots
-      const demoUser = {
-        _id: 'usr_89f02c',
-        id: 'usr_89f02c',
-        name: 'Sarah Connor',
-        email: 'sarah@codetogether.dev',
-        avatar: 'SC',
-        handle: '@sarah_c',
-        role: 'architect',
+      // Check for locally saved guest profile
+      const savedGuest = localStorage.getItem('cdt_guest_user');
+      if (savedGuest) {
+        try {
+          setUser(JSON.parse(savedGuest));
+          setLoading(false);
+          return;
+        } catch (e) {}
+      }
+
+      // Default clean developer profile based on random ID
+      const newGuestId = `dev_${Math.random().toString(36).substring(2, 8)}`;
+      const defaultProfile = {
+        _id: newGuestId,
+        id: newGuestId,
+        name: 'Developer',
+        email: '',
+        avatar: 'DV',
+        handle: `@${newGuestId}`,
+        role: 'developer',
         settings: {
           micMutedByDefault: false,
           cameraOffByDefault: false,
@@ -43,8 +58,8 @@ export const AuthProvider = ({ children }) => {
           tabSize: 2,
         },
       };
-
-      setUser(demoUser);
+      setUser(defaultProfile);
+      localStorage.setItem('cdt_guest_user', JSON.stringify(defaultProfile));
       setLoading(false);
     };
 
@@ -63,6 +78,7 @@ export const AuthProvider = ({ children }) => {
         throw new Error(data.message || 'Login failed');
       }
       localStorage.setItem('cdt_token', data.token);
+      localStorage.removeItem('cdt_guest_user');
       setToken(data.token);
       setUser(data.user);
       return data;
@@ -83,6 +99,7 @@ export const AuthProvider = ({ children }) => {
         throw new Error(data.message || 'Registration failed');
       }
       localStorage.setItem('cdt_token', data.token);
+      localStorage.removeItem('cdt_guest_user');
       setToken(data.token);
       setUser(data.user);
       return data;
@@ -93,9 +110,27 @@ export const AuthProvider = ({ children }) => {
 
   const logout = () => {
     localStorage.removeItem('cdt_token');
+    localStorage.removeItem('cdt_guest_user');
     setToken('');
-    // Reset to demo user or null
-    setUser(null);
+    const guestId = `dev_${Math.random().toString(36).substring(2, 8)}`;
+    const guest = {
+      _id: guestId,
+      id: guestId,
+      name: 'Developer',
+      email: '',
+      avatar: 'DV',
+      handle: `@${guestId}`,
+      role: 'developer',
+      settings: {
+        micMutedByDefault: false,
+        cameraOffByDefault: false,
+        theme: 'vs-dark',
+        fontSize: 14,
+        tabSize: 2,
+      },
+    };
+    setUser(guest);
+    localStorage.setItem('cdt_guest_user', JSON.stringify(guest));
   };
 
   const updateProfile = async (updateData) => {
@@ -115,8 +150,15 @@ export const AuthProvider = ({ children }) => {
           return data.user;
         }
       }
-      // Local fallback
-      setUser(prev => ({ ...prev, ...updateData }));
+      // Update local profile
+      setUser(prev => {
+        const updated = { ...prev, ...updateData };
+        if (updateData.name) {
+          updated.avatar = updateData.name.substring(0, 2).toUpperCase();
+        }
+        localStorage.setItem('cdt_guest_user', JSON.stringify(updated));
+        return updated;
+      });
     } catch (err) {
       console.error('Update profile error:', err);
     }
@@ -128,7 +170,7 @@ export const AuthProvider = ({ children }) => {
         user,
         token,
         loading,
-        isAuthenticated: !!user,
+        isAuthenticated: !!token && !!user?.email,
         login,
         register,
         logout,

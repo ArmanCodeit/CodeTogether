@@ -1,291 +1,220 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
-import { 
-  FileCode, 
-  Folder, 
-  FolderOpen, 
-  Plus, 
-  RefreshCw, 
-  Mic, 
-  MicOff, 
-  Video as VideoIcon, 
-  VideoOff, 
-  Monitor, 
-  PenTool, 
-  Users, 
-  MessageSquare, 
-  LogOut, 
-  Play, 
-  Terminal, 
-  CheckCircle2, 
-  AlertCircle, 
-  RotateCcw, 
-  RotateCw, 
-  Settings, 
-  Maximize2, 
-  Send, 
-  Smile, 
-  Code, 
-  Copy, 
-  Check, 
+import * as Y from 'yjs';
+import { MonacoBinding } from 'y-monaco';
+import { Awareness } from 'y-protocols/awareness';
+import {
+  Code2,
+  PenTool,
+  Copy,
+  Check,
+  LogOut,
+  Plus,
+  Trash2,
+  FileCode,
+  Users,
+  Mic,
+  MicOff,
+  VideoOff,
   Crown,
-  ChevronRight,
+  Play,
+  Eye,
+  Loader2,
+  Terminal as TerminalIcon,
   ChevronDown,
-  Layers,
-  Sparkles
+  ChevronUp,
+  X,
+  AlertTriangle,
+  RotateCcw
 } from 'lucide-react';
-import confetti from 'canvas-confetti';
-import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import { useWebRTC } from '../../hooks/useWebRTC';
+import { WhiteboardView } from '../whiteboard/WhiteboardView';
+import { VideoCallPanel } from '../calls/VideoCallPanel';
 
-const DEFAULT_AUTH_CODE = `import { RedisCluster, ClusterNode } from '@ioredis/cluster';
-import { SignJWT, jwtVerify } from 'jose';
-import type { SessionClaim, MeshPeer } from '../types';
-
-// Distributed token rate limiter and WebRTC session ticket validator
-export class AuthClusterMesh {
-  private readonly cluster: RedisCluster;
-  private readonly maxSlidingWindowMs: number = 60_000;
-  private readonly sharedKeySecret: Uint8Array;
-
-  constructor(nodes: ClusterNode[], rawSecret: string) {
-    this.cluster = new RedisCluster(nodes, { enableReadyCheck: true });
-    this.sharedKeySecret = new TextEncoder().encode(rawSecret);
-  }
-
-  public async verifySessionTicket(ticket: string): Promise<SessionClaim> {
-    const { payload } = await jwtVerify(ticket, this.sharedKeySecret, {
-      algorithms: ['HS512', 'EdDSA'],
-    });
-    return payload as unknown as SessionClaim;
-  }
-
-  /** Sliding-log throttle per remote client address */
-  public async enforceRateLimit(peerIp: string, burstQuota: number): Promise<boolean> {
-    const epochNow = Date.now();
-    const bucketKey = \`ratelimit:\${peerIp}\`;
-    const pipeline = this.cluster.pipeline();
-    pipeline.zremrangebyscore(bucketKey, 0, epochNow - this.maxSlidingWindowMs);
-    pipeline.zadd(bucketKey, epochNow, \`\${epochNow}-\${Math.random()}\`);
-    pipeline.zcard(bucketKey);
-    pipeline.expire(bucketKey, Math.ceil(this.maxSlidingWindowMs / 1000));
-    
-    const results = await pipeline.exec();
-    const count = (results?.[2]?.[1] as number) || 0;
-    return count <= burstQuota;
-  }
-}
-`;
-
-const INITIAL_FALLBACK_FILES = [
-  { name: 'auth-cluster.ts', path: 'src/services/auth-cluster.ts', language: 'typescript', content: DEFAULT_AUTH_CODE },
-  { name: 'index.ts', path: 'src/services/index.ts', language: 'typescript', content: `import { AuthClusterMesh } from './auth-cluster';\n\nexport const auth = new AuthClusterMesh([], 'secret');\n` },
-  { name: 'types.d.ts', path: 'src/services/types.d.ts', language: 'typescript', content: `export interface SessionClaim { sub: string; exp: number; }\nexport interface MeshPeer { id: string; name: string; }\n` },
-  { name: 'schema.prisma', path: 'schema.prisma', language: 'prisma', content: `datasource db { provider = "postgresql" url = env("DATABASE_URL") }\n` },
-  { name: 'package.json', path: 'package.json', language: 'json', content: `{\n  "name": "cluster-mesh",\n  "version": "1.0.0"\n}\n` },
-  { name: 'docker-compose.yml', path: 'docker-compose.yml', language: 'yaml', content: `version: '3.8'\nservices:\n  redis:\n    image: redis:7-alpine\n` },
+const SUPPORTED_LANGUAGES = [
+  { id: 'c', name: 'C', ext: '.c', monacoLanguage: 'c' },
+  { id: 'cpp', name: 'C++', ext: '.cpp', monacoLanguage: 'cpp' },
+  { id: 'java', name: 'Java', ext: '.java', monacoLanguage: 'java' },
+  { id: 'javascript', name: 'JavaScript', ext: '.js', monacoLanguage: 'javascript' },
+  { id: 'typescript', name: 'TypeScript', ext: '.ts', monacoLanguage: 'typescript' },
+  { id: 'python', name: 'Python', ext: '.py', monacoLanguage: 'python' },
+  { id: 'html', name: 'HTML', ext: '.html', monacoLanguage: 'html' },
+  { id: 'css', name: 'CSS', ext: '.css', monacoLanguage: 'css' },
 ];
 
-export const WorkspaceView = ({ 
-  currentRoom, 
-  setCurrentTab, 
+const getLangObj = (langIdentifier) => {
+  if (!langIdentifier) return SUPPORTED_LANGUAGES[3];
+  const lower = langIdentifier.toLowerCase().trim();
+  return (
+    SUPPORTED_LANGUAGES.find(
+      (l) => l.id === lower || l.name.toLowerCase() === lower || l.monacoLanguage === lower
+    ) || SUPPORTED_LANGUAGES[3]
+  );
+};
+
+export const WorkspaceView = ({
+  currentRoom,
+  currentUser,
   onLeaveRoom,
-  initialMediaState 
 }) => {
-  const { user } = useAuth();
-  const { socket, latency } = useSocket();
+  const { socket, activePeers } = useSocket();
+  const roomId = currentRoom?.roomId;
+
+  // View mode: 'code' | 'whiteboard'
+  const [viewMode, setViewMode] = useState('code');
+
+  // Single Source of Truth for Selected Language
+  const [selectedLanguage, setSelectedLanguage] = useState(() => {
+    const initial = currentRoom?.language || currentRoom?.files?.[0]?.language || 'javascript';
+    return getLangObj(initial).id;
+  });
+
+  // Confirmation dialog for language change with clearing
+  const [pendingLangChange, setPendingLangChange] = useState(null);
+
+  // Room files & active file
+  const [files, setFiles] = useState(currentRoom?.files || []);
+  const [activeFilePath, setActiveFilePath] = useState(
+    currentRoom?.activeFile || currentRoom?.files?.[0]?.path || 'main.js'
+  );
+
+  // New file inline input
+  const [showNewFileInput, setShowNewFileInput] = useState(false);
+  const [newFileName, setNewFileName] = useState('');
+
+  // Invitation copy feedback
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [saveStatus, setSaveStatus] = useState('saved'); // 'saved' | 'saving'
+
+  // Video panel collapse state
+  const [isVideoCollapsed, setIsVideoCollapsed] = useState(false);
+
+  // --- Execution & Console Output State ---
+  const [isConsoleOpen, setIsConsoleOpen] = useState(false);
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [executionResult, setExecutionResult] = useState(null);
+  const [htmlPreviewDoc, setHtmlPreviewDoc] = useState('');
+
+  // Monaco and Yjs refs
+  const editorRef = useRef(null);
+  const monacoRef = useRef(null);
+  const ydocRef = useRef(null);
+  const bindingRef = useRef(null);
+  const awarenessRef = useRef(null);
+
+  // WebRTC Call Hook
   const {
     localStream,
-    screenStream,
+    peerStreams,
     isMuted,
     isCameraOff,
     isScreenSharing,
+    inCall,
+    callError,
+    startCall,
+    leaveCall,
     toggleMute,
     toggleCamera,
     toggleScreenShare,
-    initMedia
-  } = useWebRTC(currentRoom?.roomId);
+  } = useWebRTC(roomId);
 
-  // Active files and tabs
-  const [files, setFiles] = useState(
-    currentRoom?.files && currentRoom.files.length > 0 ? currentRoom.files : INITIAL_FALLBACK_FILES
-  );
-  const [activeFilePath, setActiveFilePath] = useState(
-    currentRoom?.activeFile || 'src/services/auth-cluster.ts'
-  );
-  const [openTabs, setOpenTabs] = useState([
-    'src/services/auth-cluster.ts',
-    'src/services/index.ts',
-    'src/services/types.d.ts'
-  ]);
+  const activeFile = files.find((f) => f.path === activeFilePath) || files[0] || {
+    name: 'main.js',
+    path: 'main.js',
+    language: 'javascript',
+    content: '',
+  };
 
-  // Code state
-  const activeFile = files.find(f => f.path === activeFilePath) || files[0];
-  const [codeContent, setCodeContent] = useState(activeFile?.content || DEFAULT_AUTH_CODE);
-  const editorRef = useRef(null);
-  const monacoRef = useRef(null);
+  const currentLangObj = getLangObj(selectedLanguage);
 
-  // Synchronize when currentRoom updates with real backend files
+  // Synchronize language state if currentRoom updates from outside
   useEffect(() => {
+    if (currentRoom?.language) {
+      const matched = getLangObj(currentRoom.language);
+      setSelectedLanguage(matched.id);
+    }
     if (currentRoom?.files && currentRoom.files.length > 0) {
       setFiles(currentRoom.files);
-      const active = currentRoom.activeFile || currentRoom.files[0].path;
-      setActiveFilePath(active);
-      const file = currentRoom.files.find(f => f.path === active) || currentRoom.files[0];
-      if (file) setCodeContent(file.content);
+      if (!activeFilePath || !currentRoom.files.some((f) => f.path === activeFilePath)) {
+        setActiveFilePath(currentRoom.activeFile || currentRoom.files[0].path);
+      }
     }
   }, [currentRoom]);
 
-  // Collaborator presence / cursors
-  const [collaboratorCursors, setCollaboratorCursors] = useState({
-    priya: { line: 15, col: 2, name: 'Priya', color: '#10B981' }
-  });
+  // Setup Yjs binding to Monaco Editor
+  const setupYjsBinding = useCallback((editor, monaco, filePath, initialContent) => {
+    if (!editor || !monaco) return;
 
-  // Bottom Console Drawer state
-  const [consoleTab, setConsoleTab] = useState('console'); // console, tests, socket, problems
-  const [isConsoleExpanded, setIsConsoleExpanded] = useState(true);
-  const [consoleLogs, setConsoleLogs] = useState([
-    { time: '14:48:02.112', type: 'info', text: 'INFO Cluster mesh handshake established with master node-02 (latency 14.2ms)' },
-    { time: '14:48:02.190', type: 'info', text: 'ICE Candidate pair selected: host (127.0.0.1:5000)' },
-    { time: '14:48:04.004', type: 'stream', text: 'STREAMS room/arch-review-cluster:editor-crdt' },
-  ]);
-  const [testResults, setTestResults] = useState([
-    { name: 'AuthClusterMesh > verifies HMAC SHA-512 session ticket', time: '14ms', status: 'pass' },
-    { name: 'AuthClusterMesh > enforces sliding window rate limit threshold', time: '8ms', status: 'pass' },
-    { name: 'AuthClusterMesh > purges stale redis sliding log keys', time: '6ms', status: 'pass' }
-  ]);
-
-  // Right Panel: Videos & Chat
-  const [rightPanelTab, setRightPanelTab] = useState('mesh'); // 'mesh' or 'chat'
-  const [chatMessages, setChatMessages] = useState([
-    {
-      id: '1',
-      senderName: 'Priya Patel',
-      senderAvatar: 'PP',
-      time: '14:46',
-      text: 'Check the Redis client pooling logic on L24. We need auto-pipelining enabled for concurrent tickets.',
-    },
-    {
-      id: '2',
-      senderName: 'Marcus Vance',
-      senderAvatar: 'MV',
-      time: '14:47',
-      text: 'Merged the token expiry fix. Running benchmark specs now with `npm test`.',
-      codeSnippet: 'npm test',
-    },
-    {
-      id: '3',
-      senderName: user?.name || 'Sarah Connor',
-      senderAvatar: user?.avatar || 'SC',
-      isYou: true,
-      time: '14:48',
-      text: 'Looking good. I am locking down the sliding window budget to 60k ms.',
+    // Destroy existing binding
+    if (bindingRef.current) {
+      bindingRef.current.destroy();
+      bindingRef.current = null;
     }
-  ]);
-  const [chatInput, setChatInput] = useState('');
-  const chatBottomRef = useRef(null);
-
-  // File tree expanded folders
-  const [openFolders, setOpenFolders] = useState({
-    src: true,
-    services: true,
-  });
-
-  // Initialize media on load
-  useEffect(() => {
-    initMedia(!initialMediaState?.isMuted, !initialMediaState?.isCameraOff);
-  }, []);
-
-  // Sync active file content
-  useEffect(() => {
-    if (activeFile) {
-      setCodeContent(activeFile.content);
+    if (ydocRef.current) {
+      ydocRef.current.destroy();
     }
-  }, [activeFilePath, activeFile]);
 
-  // Socket event listeners for real-time code and chat
-  useEffect(() => {
-    if (!socket) return;
+    const doc = new Y.Doc();
+    ydocRef.current = doc;
 
-    socket.on('code-update', ({ filePath, content, senderSocketId }) => {
-      if (senderSocketId !== socket.id) {
-        setFiles(prev => prev.map(f => f.path === filePath ? { ...f, content } : f));
-        if (filePath === activeFilePath) {
-          setCodeContent(content);
-        }
-      }
+    const awareness = new Awareness(doc);
+    awarenessRef.current = awareness;
+    awareness.setLocalStateField('user', {
+      name: currentUser?.name || 'Developer',
+      color: '#7C9CFF',
     });
 
-    socket.on('cursor-update', ({ name, filePath, cursor }) => {
-      if (filePath === activeFilePath && cursor) {
-        setCollaboratorCursors(prev => ({
-          ...prev,
-          [name.toLowerCase()]: { line: cursor.lineNumber, col: cursor.column, name, color: '#10B981' }
-        }));
-      }
-    });
+    const model = editor.getModel();
+    if (!model) return;
 
-    socket.on('new-chat-message', (msg) => {
-      setChatMessages(prev => [...prev, {
-        id: msg._id || Math.random().toString(),
-        senderName: msg.senderName,
-        senderAvatar: msg.senderAvatar,
-        time: new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        text: msg.text,
-        codeSnippet: msg.codeSnippet?.code,
-        isYou: msg.senderId === (user?._id || user?.id),
-      }]);
-    });
+    const yText = doc.getText('monaco');
+    const binding = new MonacoBinding(yText, model, new Set([editor]), awareness);
+    bindingRef.current = binding;
 
-    socket.on('test-run-output', ({ logs }) => {
-      setConsoleLogs(prev => [...prev, ...logs]);
-      setConsoleTab('tests');
-      confetti({ particleCount: 25, spread: 45 });
-    });
-
-    return () => {
-      socket.off('code-update');
-      socket.off('cursor-update');
-      socket.off('new-chat-message');
-      socket.off('test-run-output');
-    };
-  }, [socket, activeFilePath, user]);
-
-  // Scroll chat to bottom
-  useEffect(() => {
-    chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages, rightPanelTab]);
-
-  // Handle Code Change in Monaco
-  const handleEditorChange = (newContent) => {
-    setCodeContent(newContent);
-    // Update local file
-    setFiles(prev => prev.map(f => f.path === activeFilePath ? { ...f, content: newContent } : f));
-    // Emit to peers
-    if (socket && currentRoom) {
-      socket.emit('code-change', {
-        roomId: currentRoom.roomId,
-        filePath: activeFilePath,
-        content: newContent,
+    // Request full CRDT state from server for this file
+    if (socket && roomId) {
+      socket.emit('yjs-request-init', {
+        roomId,
+        filePath,
+        defaultContent: initialContent || '',
       });
     }
-  };
 
-  // Handle Monaco Mount
+    // Listen to local doc updates and broadcast
+    doc.on('update', (update, origin) => {
+      if (origin !== 'socket' && origin !== 'server-init') {
+        setSaveStatus('saving');
+        if (socket && roomId) {
+          socket.emit('yjs-update', {
+            roomId,
+            filePath,
+            update: Array.from(update),
+          });
+        }
+        setTimeout(() => setSaveStatus('saved'), 600);
+      }
+    });
+  }, [socket, roomId, currentUser]);
+
+  // Monaco Mount Handler
   const handleEditorDidMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
 
-    if (codeContent) {
-      editor.setValue(codeContent);
+    // Set initial model language
+    const model = editor.getModel();
+    if (model) {
+      monaco.editor.setModelLanguage(model, currentLangObj.monacoLanguage);
     }
 
-    // Listen to cursor changes
+    setupYjsBinding(editor, monaco, activeFilePath, activeFile.content);
+
+    // Track cursor for collaborator cursor updates
     editor.onDidChangeCursorPosition((e) => {
-      if (socket && currentRoom) {
+      if (socket && roomId) {
         socket.emit('cursor-move', {
-          roomId: currentRoom.roomId,
+          roomId,
           filePath: activeFilePath,
           cursor: { lineNumber: e.position.lineNumber, column: e.position.column },
         });
@@ -293,683 +222,860 @@ export const WorkspaceView = ({
     });
   };
 
-  // Run Tests Handler
-  const handleRunTests = () => {
-    if (socket && currentRoom) {
-      socket.emit('run-tests', { roomId: currentRoom.roomId });
+  // Re-bind Yjs when active file changes
+  useEffect(() => {
+    if (editorRef.current && monacoRef.current && activeFilePath) {
+      setupYjsBinding(
+        editorRef.current,
+        monacoRef.current,
+        activeFilePath,
+        activeFile.content
+      );
     }
-    setConsoleTab('tests');
-  };
+  }, [activeFilePath]);
 
-  // Format Code
-  const handleFormatCode = () => {
-    editorRef.current?.getAction('editor.action.formatDocument')?.run();
-    confetti({ particleCount: 15, spread: 40 });
-  };
+  // Socket listeners for Yjs, files, language changes
+  useEffect(() => {
+    if (!socket) return;
 
-  // Send Chat Message
-  const handleSendChat = (e) => {
-    e?.preventDefault();
-    if (!chatInput.trim()) return;
+    const handleYjsInit = ({ filePath, state, content }) => {
+      if (filePath === activeFilePath && ydocRef.current && state) {
+        Y.applyUpdate(ydocRef.current, new Uint8Array(state), 'server-init');
+        setSaveStatus('saved');
+      }
+    };
 
-    if (socket && currentRoom) {
-      socket.emit('send-chat-message', {
-        roomId: currentRoom.roomId,
-        text: chatInput.trim(),
-      });
+    const handleYjsUpdate = ({ filePath, update, senderSocketId }) => {
+      if (filePath === activeFilePath && ydocRef.current && update && senderSocketId !== socket.id) {
+        Y.applyUpdate(ydocRef.current, new Uint8Array(update), 'socket');
+      }
+    };
+
+    const handleFilesUpdated = ({ files: updatedFiles, activeFile: newActive }) => {
+      if (Array.isArray(updatedFiles)) {
+        setFiles(updatedFiles);
+        if (newActive && newActive !== activeFilePath) {
+          setActiveFilePath(newActive);
+        }
+      }
+    };
+
+    const handleLanguageUpdated = ({ language, files: updatedFiles, activeFile: newActive, clearContent }) => {
+      const langObj = getLangObj(language);
+      setSelectedLanguage(langObj.id);
+
+      if (Array.isArray(updatedFiles)) {
+        setFiles(updatedFiles);
+      }
+      if (newActive) {
+        setActiveFilePath(newActive);
+      }
+
+      // Update Monaco model language
+      if (editorRef.current && monacoRef.current) {
+        const model = editorRef.current.getModel();
+        if (model) {
+          monacoRef.current.editor.setModelLanguage(model, langObj.monacoLanguage);
+        }
+        if (clearContent) {
+          editorRef.current.setValue('');
+        }
+      }
+
+      // Clear Yjs document text
+      if (clearContent && ydocRef.current) {
+        const ytext = ydocRef.current.getText('monaco');
+        if (ytext.length > 0) {
+          ydocRef.current.transact(() => {
+            ytext.delete(0, ytext.length);
+          });
+        }
+      }
+    };
+
+    socket.on('yjs-init', handleYjsInit);
+    socket.on('yjs-update', handleYjsUpdate);
+    socket.on('files-updated', handleFilesUpdated);
+    socket.on('language-updated', handleLanguageUpdated);
+
+    return () => {
+      socket.off('yjs-init', handleYjsInit);
+      socket.off('yjs-update', handleYjsUpdate);
+      socket.off('files-updated', handleFilesUpdated);
+      socket.off('language-updated', handleLanguageUpdated);
+    };
+  }, [socket, activeFilePath]);
+
+  // Request Language Change (prompts confirmation if editor contains unsaved code)
+  const handleLanguageChangeRequest = (e) => {
+    const targetLangId = e.target.value;
+    if (targetLangId === selectedLanguage) return;
+
+    const currentText = editorRef.current ? editorRef.current.getValue() : '';
+    if (currentText && currentText.trim().length > 0) {
+      setPendingLangChange(targetLangId);
     } else {
-      // Local fallback
-      setChatMessages(prev => [...prev, {
-        id: Math.random().toString(),
-        senderName: user?.name || 'Sarah Connor',
-        senderAvatar: user?.avatar || 'SC',
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        text: chatInput.trim(),
-        isYou: true,
-      }]);
+      applyLanguageChange(targetLangId);
     }
-    setChatInput('');
   };
 
-  // Tab switching
-  const handleSelectTab = (path) => {
-    if (!openTabs.includes(path)) {
-      setOpenTabs([...openTabs, path]);
+  // Perform Language Change & Clear Document
+  const applyLanguageChange = (targetLangId) => {
+    const langObj = getLangObj(targetLangId);
+    setSelectedLanguage(langObj.id);
+
+    // 1. Immediately clear Monaco Editor & update language mode
+    if (editorRef.current) {
+      editorRef.current.setValue('');
+      if (monacoRef.current) {
+        const model = editorRef.current.getModel();
+        if (model) {
+          monacoRef.current.editor.setModelLanguage(model, langObj.monacoLanguage);
+        }
+      }
     }
-    setActiveFilePath(path);
+
+    // 2. Clear Yjs doc text
+    if (ydocRef.current) {
+      const ytext = ydocRef.current.getText('monaco');
+      if (ytext.length > 0) {
+        ydocRef.current.transact(() => {
+          ytext.delete(0, ytext.length);
+        });
+      }
+    }
+
+    // 3. Rename active file extension
+    let newFileName;
+    if (langObj.id === 'java') {
+      newFileName = 'Main.java';
+    } else if (langObj.id === 'html') {
+      newFileName = 'index.html';
+    } else if (langObj.id === 'css') {
+      newFileName = 'styles.css';
+    } else {
+      const baseName = activeFile.name.substring(0, activeFile.name.lastIndexOf('.')) || 'main';
+      newFileName = `${baseName}${langObj.ext}`;
+    }
+
+    const updatedFiles = files.map((f) => {
+      if (f.path === activeFilePath) {
+        return {
+          ...f,
+          name: newFileName,
+          path: newFileName,
+          language: langObj.monacoLanguage,
+          content: '',
+        };
+      }
+      return f;
+    });
+
+    setFiles(updatedFiles);
+    setActiveFilePath(newFileName);
+    setExecutionResult(null);
+
+    // 4. Broadcast to room via socket with clearContent: true
+    if (socket && roomId) {
+      socket.emit('language-change', {
+        roomId,
+        language: langObj.id,
+        filePath: activeFilePath,
+        newPath: newFileName,
+        clearContent: true,
+      });
+    }
+
+    // 5. Persist cleared state to DB
+    fetch(`/api/rooms/${roomId}/files`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        files: updatedFiles,
+        activeFile: newFileName,
+        language: langObj.name,
+      }),
+    }).catch(console.warn);
+
+    setPendingLangChange(null);
   };
 
-  const closeTab = (path, e) => {
+  // --- Real Code Execution & Live Preview ---
+  const handleRunOrPreview = async () => {
+    const currentCode = editorRef.current ? editorRef.current.getValue() : activeFile.content || '';
+
+    // Handle HTML & CSS Live Preview
+    if (selectedLanguage === 'html' || selectedLanguage === 'css') {
+      let htmlContent = '';
+      let cssContent = '';
+
+      if (selectedLanguage === 'html') {
+        htmlContent = currentCode;
+        const cssFile = files.find((f) => f.path.endsWith('.css'));
+        if (cssFile) cssContent = cssFile.content || '';
+      } else {
+        cssContent = currentCode;
+        const htmlFile = files.find((f) => f.path.endsWith('.html'));
+        htmlContent = htmlFile?.content || '<h1>HTML & CSS Preview</h1><p>Edit styles or HTML to preview live.</p>';
+      }
+
+      const combinedHtml = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 16px; color: #111; }
+    ${cssContent}
+  </style>
+</head>
+<body>
+  ${htmlContent}
+</body>
+</html>`;
+
+      setHtmlPreviewDoc(combinedHtml);
+      setIsConsoleOpen(true);
+      return;
+    }
+
+    // Execute compiled/interpreted language (C, C++, Java, Python, JS, TS)
+    if (!currentCode.trim()) {
+      setIsConsoleOpen(true);
+      setExecutionResult({
+        success: false,
+        status: 'Error',
+        stderr: 'Source code is empty. Please write some code before executing.',
+      });
+      return;
+    }
+
+    setIsExecuting(true);
+    setIsConsoleOpen(true);
+    setExecutionResult(null);
+
+    try {
+      const res = await fetch('/api/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          language: selectedLanguage,
+          code: currentCode,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setExecutionResult({
+          success: false,
+          status: 'Error',
+          stderr: data.error || 'Execution service error.',
+        });
+      } else {
+        setExecutionResult(data);
+      }
+    } catch (err) {
+      setExecutionResult({
+        success: false,
+        status: 'Network Error',
+        stderr: `Failed to connect to execution service: ${err.message}`,
+      });
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  // Create New File
+  const handleCreateFile = (e) => {
+    e?.preventDefault();
+    if (!newFileName.trim()) return;
+
+    const trimmed = newFileName.trim();
+    const ext = trimmed.includes('.') ? `.${trimmed.split('.').pop()}` : currentLangObj.ext;
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}${ext}`;
+
+    const matchedLang = SUPPORTED_LANGUAGES.find((l) => l.ext === ext) || currentLangObj;
+
+    const newFile = {
+      name: finalName,
+      path: finalName,
+      language: matchedLang.monacoLanguage,
+      content: '',
+    };
+
+    const updatedFiles = [...files, newFile];
+    setFiles(updatedFiles);
+    setActiveFilePath(finalName);
+    setNewFileName('');
+    setShowNewFileInput(false);
+
+    if (socket && roomId) {
+      socket.emit('file-created', { roomId, file: newFile });
+    }
+
+    fetch(`/api/rooms/${roomId}/files`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: updatedFiles, activeFile: finalName }),
+    }).catch(console.warn);
+  };
+
+  // Delete File
+  const handleDeleteFile = (path, e) => {
     e.stopPropagation();
-    const filtered = openTabs.filter(p => p !== path);
-    setOpenTabs(filtered);
-    if (activeFilePath === path && filtered.length > 0) {
-      setActiveFilePath(filtered[filtered.length - 1]);
+    if (files.length <= 1) {
+      alert('Cannot delete the only file in the workspace.');
+      return;
     }
+    if (!confirm(`Are you sure you want to delete ${path}?`)) return;
+
+    const filtered = files.filter((f) => f.path !== path);
+    const newActive = filtered[0].path;
+
+    setFiles(filtered);
+    setActiveFilePath(newActive);
+
+    if (socket && roomId) {
+      socket.emit('file-deleted', { roomId, filePath: path });
+    }
+
+    fetch(`/api/rooms/${roomId}/files`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: filtered, activeFile: newActive }),
+    }).catch(console.warn);
   };
 
-  const activePeers = [
-    { name: 'Sarah Connor', role: 'Host', isHost: true, avatar: 'SC', mic: !isMuted, status: 'Host' },
-    { name: 'Marcus Vance', role: 'peer', avatar: 'MV', mic: true, status: 'Active' },
-    { name: 'Priya Patel', role: 'peer', avatar: 'PP', mic: false, status: 'Viewing Selection' },
-    { name: 'Alex Chen', role: 'peer', avatar: 'AC', mic: true, isScreen: true, status: 'Sharing canvas' },
+  // Copy shareable invitation link
+  const handleCopyInvite = () => {
+    const inviteUrl = `${window.location.origin}/?room=${roomId}`;
+    navigator.clipboard.writeText(inviteUrl);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  };
+
+  // Real participant list
+  const allParticipants = [
+    {
+      userId: currentUser?.id || 'you',
+      name: `${currentUser?.name || 'You'} (You)`,
+      avatar: (currentUser?.name || 'YOU').substring(0, 2).toUpperCase(),
+      isHost: currentRoom?.ownerId === currentUser?.id,
+      isMuted,
+      isCameraOff,
+    },
+    ...activePeers.map((p) => ({
+      userId: p.socketId,
+      name: p.name || 'Peer',
+      avatar: (p.name || 'CL').substring(0, 2).toUpperCase(),
+      isHost: currentRoom?.ownerId === p.userId,
+      isMuted: p.isMuted,
+      isCameraOff: p.isCameraOff,
+    })),
   ];
 
+  const isPreviewMode = selectedLanguage === 'html' || selectedLanguage === 'css';
+
   return (
-    <div className="flex-1 flex flex-col bg-[#0A0D14] h-[calc(100vh-3.5rem)] overflow-hidden">
-      {/* Main Workspace Body: 3-column split */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Column: Breadcrumb, Live Mesh list, File Tree, Media actions, Console */}
-        <div className="w-72 bg-[#0C101A] border-r border-[#1E2638] flex flex-col justify-between shrink-0 select-none">
-          {/* Top Section */}
-          <div className="flex-1 overflow-y-auto">
-            {/* Breadcrumb */}
-            <div className="px-3.5 py-2 border-b border-[#1A2234] text-[11px] font-mono text-slate-400 flex items-center space-x-1.5 truncate">
-              <span className="text-slate-500">src</span>
-              <span>/</span>
-              <span className="text-slate-500">services</span>
-              <span>/</span>
-              <span className="text-sky-400 font-semibold">{activeFile?.name || 'auth-cluster.ts'}</span>
+    <div className="flex-1 flex flex-col h-screen w-screen overflow-hidden bg-[#101318] text-[#F1F4F9]">
+      {/* Top Workspace Header */}
+      <header className="h-14 bg-[#171B22] border-b border-[#303744] px-4 flex items-center justify-between select-none z-30 shrink-0">
+        {/* Left: Brand & Room Code */}
+        <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-2">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#7C9CFF] to-[#5173E8] flex items-center justify-center shadow-md">
+              <Code2 className="w-4 h-4 text-[#101318] stroke-[2.5]" />
             </div>
-
-            {/* LIVE MESH (4/10) */}
-            <div className="p-3 border-b border-[#1A2234]">
-              <div className="flex items-center justify-between text-[11px] font-mono mb-2">
-                <span className="text-slate-400 flex items-center gap-1.5 font-semibold">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  LIVE MESH ({activePeers.length}/10)
-                </span>
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              </div>
-
-              {/* Peers list */}
-              <div className="space-y-1.5">
-                {activePeers.map((peer, idx) => (
-                  <div key={idx} className="flex items-center justify-between p-1.5 rounded-lg bg-[#111724] border border-[#1A2336] text-xs">
-                    <div className="flex items-center space-x-2 truncate">
-                      <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center font-bold text-[10px] text-white shrink-0">
-                        {peer.avatar}
-                      </div>
-                      <div className="truncate">
-                        <div className="flex items-center space-x-1">
-                          <span className="font-semibold text-slate-200 text-xs truncate">{peer.name}</span>
-                          {peer.isHost && <Crown className="w-3 h-3 text-amber-400 shrink-0" />}
-                        </div>
-                        <div className="text-[10px] text-slate-500 font-mono leading-none">
-                          {peer.status}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="shrink-0 flex items-center space-x-1">
-                      {peer.isScreen && <Monitor className="w-3 h-3 text-sky-400" />}
-                      {peer.mic ? (
-                        <Mic className="w-3 h-3 text-emerald-400" />
-                      ) : (
-                        <MicOff className="w-3 h-3 text-rose-400" />
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* PROJECT ROOT File Tree */}
-            <div className="p-3">
-              <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 uppercase font-semibold mb-2">
-                <span>PROJECT ROOT</span>
-                <div className="flex items-center space-x-1 text-slate-500">
-                  <button 
-                    onClick={() => {
-                      const name = prompt('Enter new file name: (e.g. redis-cache.ts)');
-                      if (name) {
-                        const newF = { name, path: `src/services/${name}`, language: 'typescript', content: `// ${name}\n` };
-                        setFiles([...files, newF]);
-                        setOpenTabs([...openTabs, newF.path]);
-                        setActiveFilePath(newF.path);
-                      }
-                    }} 
-                    title="Add file" 
-                    className="p-1 hover:text-white"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                  </button>
-                  <button title="Refresh" className="p-1 hover:text-white"><RefreshCw className="w-3.5 h-3.5" /></button>
-                </div>
-              </div>
-
-              {/* Tree files */}
-              <div className="space-y-1 text-xs font-mono">
-                {/* src folder */}
-                <div>
-                  <div 
-                    onClick={() => setOpenFolders(p => ({ ...p, src: !p.src }))}
-                    className="flex items-center space-x-1.5 py-1 px-1 rounded text-slate-300 hover:bg-[#141B2A] cursor-pointer"
-                  >
-                    {openFolders.src ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronRight className="w-3 h-3 text-slate-500" />}
-                    <Folder className="w-3.5 h-3.5 text-amber-400" />
-                    <span>src</span>
-                  </div>
-
-                  {openFolders.src && (
-                    <div className="pl-4 space-y-1">
-                      {/* services folder */}
-                      <div 
-                        onClick={() => setOpenFolders(p => ({ ...p, services: !p.services }))}
-                        className="flex items-center space-x-1.5 py-1 px-1 rounded text-slate-300 hover:bg-[#141B2A] cursor-pointer"
-                      >
-                        {openFolders.services ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronRight className="w-3 h-3 text-slate-500" />}
-                        <Folder className="w-3.5 h-3.5 text-amber-400" />
-                        <span>services</span>
-                      </div>
-
-                      {openFolders.services && (
-                        <div className="pl-4 space-y-0.5">
-                          {files.filter(f => f.path.startsWith('src/services/')).map(f => (
-                            <div
-                              key={f.path}
-                              onClick={() => handleSelectTab(f.path)}
-                              className={`flex items-center justify-between py-1 px-2 rounded cursor-pointer transition-colors ${
-                                activeFilePath === f.path
-                                  ? 'bg-[#182338] text-white font-semibold'
-                                  : 'text-slate-400 hover:text-slate-200 hover:bg-[#111724]'
-                              }`}
-                            >
-                              <div className="flex items-center space-x-1.5 truncate">
-                                <span className="text-[10px] font-bold text-sky-400">TS</span>
-                                <span className="truncate">{f.name}</span>
-                              </div>
-                              {activeFilePath === f.path && (
-                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                {/* Root files */}
-                {files.filter(f => !f.path.startsWith('src/')).map(f => (
-                  <div
-                    key={f.path}
-                    onClick={() => handleSelectTab(f.path)}
-                    className={`flex items-center space-x-1.5 py-1 px-2 rounded cursor-pointer transition-colors ${
-                      activeFilePath === f.path
-                        ? 'bg-[#182338] text-white font-semibold'
-                        : 'text-slate-400 hover:text-slate-200 hover:bg-[#111724]'
-                    }`}
-                  >
-                    <FileCode className="w-3.5 h-3.5 text-slate-500" />
-                    <span className="truncate">{f.name}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <span className="font-extrabold text-sm tracking-tight text-[#F1F4F9] hidden sm:inline">
+              CodeTogether
+            </span>
           </div>
 
-          {/* Bottom Dock: Room Checkpoint + Quick Media Controls */}
-          <div className="border-t border-[#1E2638] bg-[#0A0D14] p-3 space-y-2.5">
-            <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
-              <span>ROOM CHECKPOINT</span>
-              <span className="text-emerald-400 font-bold">V0.8.2</span>
-            </div>
-
-            {/* Quick Media Action Bar */}
-            <div className="flex items-center justify-between bg-[#111724] border border-[#1E2638] p-1.5 rounded-xl">
-              <button
-                onClick={toggleMute}
-                title={isMuted ? 'Unmute' : 'Mute'}
-                className={`p-1.5 rounded-lg transition-colors ${isMuted ? 'bg-rose-500/20 text-rose-400' : 'bg-[#182032] text-slate-300 hover:text-white'}`}
-              >
-                {isMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
-              </button>
-
-              <button
-                onClick={toggleCamera}
-                title={isCameraOff ? 'Start Camera' : 'Stop Camera'}
-                className={`p-1.5 rounded-lg transition-colors ${isCameraOff ? 'bg-rose-500/20 text-rose-400' : 'bg-[#182032] text-slate-300 hover:text-white'}`}
-              >
-                {isCameraOff ? <VideoOff className="w-3.5 h-3.5" /> : <VideoIcon className="w-3.5 h-3.5" />}
-              </button>
-
-              <button
-                onClick={toggleScreenShare}
-                title={isScreenSharing ? 'Stop Screen Share' : 'Share Screen'}
-                className={`p-1.5 rounded-lg transition-colors ${isScreenSharing ? 'bg-sky-500 text-white' : 'bg-[#182032] text-slate-300 hover:text-white'}`}
-              >
-                <Monitor className="w-3.5 h-3.5" />
-              </button>
-
-              {/* Doodle Board Syncing Button */}
-              <button
-                onClick={() => setCurrentTab('whiteboard')}
-                title="Switch to Doodle Board"
-                className="flex items-center space-x-1 px-2 py-1 rounded-lg bg-sky-500/10 border border-sky-500/30 text-sky-400 text-[10px] font-mono font-semibold hover:bg-sky-500/20 transition-colors"
-              >
-                <PenTool className="w-3 h-3" />
-                <span>Doodle Board</span>
-                <span className="w-1 h-1 rounded-full bg-emerald-400 animate-ping" />
-              </button>
-
-              {/* Leave Room Red Button */}
-              <button
-                onClick={onLeaveRoom}
-                title="Leave Room"
-                className="p-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 transition-colors"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-              </button>
-            </div>
+          {/* Room Code Badge */}
+          <div className="flex items-center space-x-2 px-2.5 py-1 rounded-lg bg-[#1D232D] border border-[#303744] text-xs font-mono">
+            <span className="w-2 h-2 rounded-full bg-[#66D9C1] animate-pulse" />
+            <span className="text-[#9AA5B5]">Room:</span>
+            <span className="font-bold text-[#F1F4F9]">{roomId}</span>
           </div>
+
+          {/* Copy Invite Link Button */}
+          <button
+            onClick={handleCopyInvite}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-[#1D232D] hover:bg-[#252E3B] text-xs font-mono font-medium text-[#7C9CFF] border border-[#303744] transition-all"
+            title="Copy Invitation Link"
+          >
+            {copiedLink ? <Check className="w-3.5 h-3.5 text-[#66D9C1]" /> : <Copy className="w-3.5 h-3.5" />}
+            <span>{copiedLink ? 'Link Copied!' : 'Copy Link'}</span>
+          </button>
         </div>
 
-        {/* Center Monaco Editor Panel */}
-        <div className="flex-1 flex flex-col bg-[#0F1420] overflow-hidden">
-          {/* Top File Tabs Bar */}
-          <div className="h-10 bg-[#0B0F17] border-b border-[#1E2638] flex items-center justify-between px-2 select-none">
-            <div className="flex items-center space-x-1 overflow-x-auto h-full">
-              {openTabs.map((path) => {
-                const name = path.split('/').pop();
-                const isActive = activeFilePath === path;
-                return (
-                  <div
-                    key={path}
-                    onClick={() => setActiveFilePath(path)}
-                    className={`h-full flex items-center space-x-2 px-3 border-r border-[#1E2638] text-xs font-mono cursor-pointer transition-colors ${
-                      isActive
-                        ? 'bg-[#0F1420] text-sky-400 border-t-2 border-t-sky-400 font-semibold'
-                        : 'text-slate-400 hover:text-slate-200 hover:bg-[#111724]'
-                    }`}
+        {/* Center: View Switcher (Code vs Whiteboard) */}
+        <div className="flex items-center bg-[#101318] p-1 rounded-xl border border-[#303744]">
+          <button
+            onClick={() => setViewMode('code')}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              viewMode === 'code'
+                ? 'bg-[#1D232D] text-[#7C9CFF] shadow-sm font-bold border border-[#303744]'
+                : 'text-[#9AA5B5] hover:text-[#F1F4F9]'
+            }`}
+          >
+            <Code2 className="w-4 h-4" />
+            <span>Code Editor</span>
+          </button>
+
+          <button
+            onClick={() => setViewMode('whiteboard')}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              viewMode === 'whiteboard'
+                ? 'bg-[#1D232D] text-[#66D9C1] shadow-sm font-bold border border-[#303744]'
+                : 'text-[#9AA5B5] hover:text-[#F1F4F9]'
+            }`}
+          >
+            <PenTool className="w-4 h-4" />
+            <span>Whiteboard</span>
+          </button>
+        </div>
+
+        {/* Right: Participant count & Leave Room button */}
+        <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-1.5 text-xs font-mono text-[#9AA5B5]">
+            <Users className="w-3.5 h-3.5 text-[#7C9CFF]" />
+            <span className="font-bold text-[#F1F4F9]">{allParticipants.length}</span>
+            <span>/ 10</span>
+          </div>
+
+          <button
+            onClick={onLeaveRoom}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 text-xs font-bold transition-colors"
+            title="Leave Workspace"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Leave Room</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Main Workspace Body */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left Minimal Sidebar (Shown in Code mode) */}
+        {viewMode === 'code' && (
+          <aside className="w-64 bg-[#171B22] border-r border-[#303744] flex flex-col justify-between select-none shrink-0">
+            <div className="p-3 space-y-4 overflow-y-auto">
+              {/* Language Selector Dropdown */}
+              <div>
+                <label className="block text-[10px] font-mono uppercase font-bold text-[#9AA5B5] mb-1.5">
+                  LANGUAGE
+                </label>
+                <select
+                  value={selectedLanguage}
+                  onChange={handleLanguageChangeRequest}
+                  className="w-full bg-[#101318] border border-[#303744] focus:border-[#7C9CFF] text-[#7C9CFF] rounded-lg px-2.5 py-1.5 text-xs font-mono outline-none cursor-pointer"
+                >
+                  {SUPPORTED_LANGUAGES.map((lang) => (
+                    <option key={lang.id} value={lang.id} className="bg-[#171B22] text-[#F1F4F9]">
+                      {lang.name} ({lang.ext})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Minimal File Selector */}
+              <div>
+                <div className="flex items-center justify-between text-[10px] font-mono uppercase font-bold text-[#9AA5B5] mb-1.5">
+                  <span>FILES ({files.length})</span>
+                  <button
+                    onClick={() => setShowNewFileInput(!showNewFileInput)}
+                    className="p-1 hover:text-[#F1F4F9] hover:bg-[#1D232D] rounded"
+                    title="Add File"
                   >
-                    <span className="text-[10px] font-bold text-sky-400">TS</span>
-                    <span>{name}</span>
-                    {isActive && <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />}
-                  </div>
-                );
-              })}
+                    <Plus className="w-3.5 h-3.5 text-[#7C9CFF]" />
+                  </button>
+                </div>
 
-              <button
-                onClick={() => {
-                  const name = prompt('New tab filename:');
-                  if (name) {
-                    const newPath = `src/services/${name}`;
-                    setFiles([...files, { name, path: newPath, content: `// ${name}\n` }]);
-                    setOpenTabs([...openTabs, newPath]);
-                    setActiveFilePath(newPath);
-                  }
-                }}
-                className="p-1.5 text-slate-500 hover:text-slate-300"
-              >
-                <Plus className="w-3.5 h-3.5" />
-              </button>
-            </div>
+                {/* Inline new file creation input */}
+                {showNewFileInput && (
+                  <form onSubmit={handleCreateFile} className="mb-2">
+                    <input
+                      type="text"
+                      autoFocus
+                      value={newFileName}
+                      onChange={(e) => setNewFileName(e.target.value)}
+                      onBlur={() => { if (!newFileName) setShowNewFileInput(false); }}
+                      placeholder="e.g. utils.js"
+                      className="w-full bg-[#101318] border border-[#7C9CFF] rounded px-2 py-1 text-xs font-mono text-[#F1F4F9] outline-none"
+                    />
+                  </form>
+                )}
 
-            {/* Quick Actions Right of Tabs */}
-            <div className="flex items-center space-x-2 text-xs font-mono">
-              <span className="text-slate-400 text-[11px] hidden lg:inline">
-                Synced with Socket.IO stream
-              </span>
-              <span className="text-sky-400 text-[11px]">{latency}ms</span>
-              <span className="text-emerald-400 text-[11px]">main • clean</span>
-            </div>
-          </div>
-
-          {/* Sub-toolbar */}
-          <div className="h-9 bg-[#111724] border-b border-[#1E2638] px-3 flex items-center justify-between text-xs select-none">
-            <div className="flex items-center space-x-3">
-              <select 
-                value={activeFile?.language || 'typescript'}
-                onChange={(e) => {
-                  const newLang = e.target.value;
-                  setFiles(prev => prev.map(f => f.path === activeFilePath ? { ...f, language: newLang } : f));
-                }}
-                className="bg-[#0B0F17] border border-[#222E44] text-sky-400 rounded px-2 py-0.5 text-xs font-mono outline-none"
-              >
-                <option value="typescript">TypeScript v5.4</option>
-                <option value="javascript">JavaScript ES2024</option>
-                <option value="python">Python 3.12</option>
-                <option value="go">Go 1.22</option>
-                <option value="rust">Rust 1.78</option>
-              </select>
-
-              <button
-                onClick={handleFormatCode}
-                className="px-2 py-0.5 rounded hover:bg-[#1A2336] text-slate-300 font-medium transition-colors"
-              >
-                Format
-              </button>
-
-              <button
-                onClick={handleRunTests}
-                className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-sky-500 hover:bg-sky-400 active:bg-sky-600 text-white font-semibold text-xs shadow-sm transition-all"
-              >
-                <Play className="w-3 h-3 fill-current" />
-                <span>Run Tests</span>
-                <span className="text-[10px] font-mono opacity-80">⌘↵</span>
-              </button>
-            </div>
-
-            <div className="flex items-center space-x-2 text-slate-400">
-              <button onClick={() => editorRef.current?.trigger('', 'undo')} title="Undo" className="p-1 hover:text-white"><RotateCcw className="w-3.5 h-3.5" /></button>
-              <button onClick={() => editorRef.current?.trigger('', 'redo')} title="Redo" className="p-1 hover:text-white"><RotateCw className="w-3.5 h-3.5" /></button>
-              <button onClick={() => alert('Editor Settings: Monaco 0.46, JetBrains Mono font, 14px')} title="Settings" className="p-1 hover:text-white"><Settings className="w-3.5 h-3.5" /></button>
-              <button onClick={() => setIsConsoleExpanded(!isConsoleExpanded)} title="Toggle Console" className="p-1 hover:text-white"><Maximize2 className="w-3.5 h-3.5" /></button>
-            </div>
-          </div>
-
-          {/* Monaco Editor Container */}
-          <div className="flex-1 relative overflow-hidden">
-            <Editor
-              height="100%"
-              path={activeFilePath}
-              defaultLanguage="typescript"
-              defaultValue={DEFAULT_AUTH_CODE}
-              language={activeFile?.language || 'typescript'}
-              theme="vs-dark"
-              value={codeContent}
-              onChange={handleEditorChange}
-              onMount={handleEditorDidMount}
-              options={{
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: 13.5,
-                lineHeight: 22,
-                minimap: { enabled: true, side: 'right' },
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                padding: { top: 12, bottom: 12 },
-                cursorBlinking: 'smooth',
-                cursorSmoothCaretAnimation: 'on',
-                formatOnPaste: true,
-                suggestOnTriggerCharacters: true,
-              }}
-            />
-
-            {/* Collaborator Cursor Badge (Priya Patel on L15) */}
-            <div 
-              className="absolute pointer-events-none z-20 flex items-center space-x-1 transition-all duration-300"
-              style={{ top: '320px', left: '160px' }}
-            >
-              <div className="w-0.5 h-5 bg-emerald-400 animate-pulse" />
-              <span className="px-1.5 py-0.5 rounded bg-emerald-500 text-[10px] font-mono font-bold text-slate-900 shadow-md">
-                Priya
-              </span>
-            </div>
-          </div>
-
-          {/* Bottom Drawer: Console & Test Runner */}
-          {isConsoleExpanded && (
-            <div className="h-44 bg-[#0B0F17] border-t border-[#1E2638] flex flex-col font-mono text-xs">
-              {/* Drawer Tabs */}
-              <div className="h-8 bg-[#0D121D] border-b border-[#1E2638] px-3 flex items-center justify-between select-none">
-                <div className="flex items-center space-x-2">
-                  {[
-                    { id: 'console', label: 'Console (Node.js v20.11)', icon: Terminal },
-                    { id: 'tests', label: 'Test Runner (3 passed)', icon: CheckCircle2, color: 'text-emerald-400' },
-                    { id: 'socket', label: 'Socket.IO Events', icon: Layers },
-                    { id: 'problems', label: 'Problems (0)', icon: AlertCircle },
-                  ].map((t) => {
-                    const Icon = t.icon;
-                    const isActive = consoleTab === t.id;
+                {/* Files List */}
+                <div className="space-y-1">
+                  {files.map((file) => {
+                    const isActive = activeFilePath === file.path;
                     return (
-                      <button
-                        key={t.id}
-                        onClick={() => setConsoleTab(t.id)}
-                        className={`flex items-center space-x-1.5 px-2.5 py-1 rounded text-[11px] transition-colors ${
+                      <div
+                        key={file.path}
+                        onClick={() => setActiveFilePath(file.path)}
+                        className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg cursor-pointer text-xs font-mono group transition-colors ${
                           isActive
-                            ? 'bg-[#182032] text-white font-semibold border-b-2 border-sky-400'
-                            : 'text-slate-400 hover:text-slate-200'
+                            ? 'bg-[#1D232D] text-[#7C9CFF] font-semibold border-l-2 border-[#7C9CFF]'
+                            : 'text-[#9AA5B5] hover:text-[#F1F4F9] hover:bg-[#1D232D]/50'
                         }`}
                       >
-                        <Icon className={`w-3.5 h-3.5 ${t.color || 'text-slate-400'}`} />
-                        <span>{t.label}</span>
-                      </button>
+                        <div className="flex items-center space-x-2 truncate">
+                          <FileCode className={`w-3.5 h-3.5 ${isActive ? 'text-[#7C9CFF]' : 'text-[#9AA5B5]'}`} />
+                          <span className="truncate">{file.name || file.path}</span>
+                        </div>
+                        {files.length > 1 && (
+                          <button
+                            onClick={(e) => handleDeleteFile(file.path, e)}
+                            title="Delete file"
+                            className="opacity-0 group-hover:opacity-100 p-0.5 hover:text-rose-400 transition-opacity"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
-
-                <div className="text-[11px] text-slate-500">
-                  Latency: <span className="text-emerald-400 font-bold">{latency}ms</span>
-                </div>
               </div>
 
-              {/* Drawer Content */}
-              <div className="flex-1 p-3 overflow-y-auto space-y-1 text-[11px]">
-                {consoleTab === 'console' && (
-                  <>
-                    {consoleLogs.map((log, idx) => (
-                      <div key={idx} className="flex items-start space-x-2 leading-relaxed">
-                        <span className="text-emerald-400">[{log.time}]</span>
-                        <span className="text-slate-300">{log.text}</span>
-                      </div>
-                    ))}
-                  </>
-                )}
-
-                {consoleTab === 'tests' && (
-                  <div className="space-y-1.5">
-                    <div className="text-emerald-400 font-bold">
-                      PASS src/services/auth-cluster.test.ts (3 passed)
-                    </div>
-                    {testResults.map((t, idx) => (
-                      <div key={idx} className="flex items-center justify-between text-slate-300 pl-4">
-                        <span className="flex items-center gap-1.5">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                          {t.name}
+              {/* Connected Participant List */}
+              <div className="pt-2 border-t border-[#303744]">
+                <div className="flex items-center justify-between text-[10px] font-mono uppercase font-bold text-[#9AA5B5] mb-2">
+                  <span>PARTICIPANTS ({allParticipants.length}/10)</span>
+                </div>
+                <div className="space-y-1.5">
+                  {allParticipants.map((p, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center justify-between p-1.5 rounded-lg bg-[#101318] border border-[#303744] text-xs"
+                    >
+                      <div className="flex items-center space-x-2 truncate">
+                        <div className="w-5 h-5 rounded-full bg-[#7C9CFF]/20 text-[#7C9CFF] flex items-center justify-center font-bold text-[9px] shrink-0">
+                          {p.avatar}
+                        </div>
+                        <span className="font-medium text-[#F1F4F9] truncate text-xs">
+                          {p.name}
                         </span>
-                        <span className="text-slate-500">{t.time}</span>
+                        {p.isHost && <Crown className="w-3 h-3 text-amber-400 shrink-0" />}
                       </div>
-                    ))}
-                    <div className="pt-1 text-slate-400 text-[10px]">
-                      Test Suites: 1 passed, 1 total • Snapshots: 0 total • Time: 0.842s
+                      <div className="shrink-0 flex items-center space-x-1">
+                        {p.isMuted ? (
+                          <MicOff className="w-3 h-3 text-rose-400" />
+                        ) : (
+                          <Mic className="w-3 h-3 text-[#66D9C1]" />
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )}
-
-                {consoleTab === 'socket' && (
-                  <div className="space-y-1 text-slate-400">
-                    <div>[SOCKET] Connected with ID: {socket?.id || 'demo-client-socket-42'}</div>
-                    <div>[SOCKET] Subscribed to rooms: arch-review-cluster, feat/cluster-sync</div>
-                    <div>[SOCKET] Transport: websocket • Encryption: TLSv1.3</div>
-                  </div>
-                )}
-
-                {consoleTab === 'problems' && (
-                  <div className="text-slate-500 py-2">No problems detected in workspace.</div>
-                )}
+                  ))}
+                </div>
               </div>
             </div>
-          )}
-        </div>
 
-        {/* Right Column: Tabbed Video Mesh & Chat */}
-        <div className="w-80 bg-[#0C101A] border-l border-[#1E2638] flex flex-col justify-between shrink-0 select-none">
-          {/* Top Tabs */}
-          <div className="h-10 bg-[#0B0F17] border-b border-[#1E2638] flex items-center justify-between px-3">
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => setRightPanelTab('mesh')}
-                className={`flex items-center space-x-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-all ${
-                  rightPanelTab === 'mesh'
-                    ? 'bg-[#182032] text-white border border-[#26324A]'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <VideoIcon className="w-3.5 h-3.5 text-sky-400" />
-                <span>Mesh Video (4)</span>
-              </button>
-
-              <button
-                onClick={() => setRightPanelTab('chat')}
-                className={`flex items-center space-x-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-all ${
-                  rightPanelTab === 'chat'
-                    ? 'bg-[#182032] text-white border border-[#26324A]'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <MessageSquare className="w-3.5 h-3.5 text-purple-400" />
-                <span>Chat ({chatMessages.length})</span>
-              </button>
+            {/* Sync status indicator */}
+            <div className="p-3 border-t border-[#303744] bg-[#101318] flex items-center justify-between text-[11px] font-mono">
+              <span className="text-[#9AA5B5]">Auto-sync</span>
+              <span className={`font-semibold ${saveStatus === 'saved' ? 'text-[#66D9C1]' : 'text-amber-400'}`}>
+                {saveStatus === 'saved' ? '● Saved' : 'Saving...'}
+              </span>
             </div>
+          </aside>
+        )}
 
-            <button
-              onClick={() => setCurrentTab('sessions')}
-              title="Expand to Full Active Calls Grid"
-              className="p-1 text-slate-500 hover:text-slate-300"
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {/* Right Panel Body */}
-          <div className="flex-1 flex flex-col overflow-hidden">
-            {/* Mesh Video Tiles (Top half of right column or toggleable) */}
-            <div className="p-3 border-b border-[#1E2638] bg-[#0A0D14]">
-              <div className="grid grid-cols-2 gap-2">
-                {/* Tile 1: Sarah (Host) */}
-                <div className="relative rounded-lg overflow-hidden bg-[#121622] border border-emerald-500/50 aspect-video flex items-center justify-center group shadow-sm">
-                  {/* Real video if local stream available or simulated webcam feed */}
-                  <div className="w-full h-full bg-gradient-to-br from-slate-800 to-indigo-950 flex items-center justify-center">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-sky-400 to-blue-600 flex items-center justify-center font-bold text-white text-xs">
-                      SC
-                    </div>
-                  </div>
-                  <div className="absolute bottom-1 left-1 bg-black/60 backdrop-blur-sm px-1.5 py-0.5 rounded text-[10px] text-white font-medium flex items-center gap-1">
-                    <span>Sarah (Host)</span>
-                    <Mic className="w-2.5 h-2.5 text-emerald-400" />
-                  </div>
-                </div>
-
-                {/* Tile 2: Marcus Vance */}
-                <div className="relative rounded-lg overflow-hidden bg-[#121622] border border-[#1E2638] aspect-video flex items-center justify-center">
-                  <div className="w-full h-full bg-gradient-to-br from-slate-900 to-slate-800 flex items-center justify-center">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-amber-500 to-orange-600 flex items-center justify-center font-bold text-white text-xs">
-                      MV
-                    </div>
-                  </div>
-                  <div className="absolute bottom-1 left-1 bg-black/60 backdrop-blur-sm px-1.5 py-0.5 rounded text-[10px] text-white font-medium flex items-center gap-1">
-                    <span>Marcus Vance</span>
-                    <Mic className="w-2.5 h-2.5 text-emerald-400" />
-                  </div>
-                </div>
-
-                {/* Tile 3: Priya Patel (Audio only) */}
-                <div className="relative rounded-lg overflow-hidden bg-[#121622] border border-[#1E2638] aspect-video flex items-center justify-center">
-                  <div className="w-10 h-10 rounded-full bg-emerald-600/30 border border-emerald-500/40 flex items-center justify-center font-bold text-emerald-400 text-xs">
-                    PP
-                  </div>
-                  <div className="absolute bottom-1 left-1 bg-black/60 backdrop-blur-sm px-1.5 py-0.5 rounded text-[10px] text-slate-300 font-medium flex items-center gap-1">
-                    <span>Priya Patel</span>
-                    <MicOff className="w-2.5 h-2.5 text-rose-400" />
-                  </div>
-                  <span className="absolute top-1 right-1 text-[8px] font-mono px-1 rounded bg-black/50 text-slate-400">
-                    AUDIO ONLY
+        {/* Center Area: Monaco Code Editor OR Whiteboard Canvas */}
+        <main className="flex-1 flex flex-col overflow-hidden bg-[#101318] relative">
+          {viewMode === 'code' ? (
+            <div className="flex-1 flex flex-col h-full overflow-hidden">
+              {/* Active Tab bar with Run / Preview Button */}
+              <div className="h-10 bg-[#171B22] border-b border-[#303744] px-3 flex items-center justify-between text-xs font-mono select-none">
+                <div className="flex items-center space-x-2 text-[#7C9CFF] font-semibold">
+                  <FileCode className="w-4 h-4" />
+                  <span>{activeFile.name}</span>
+                  <span className="text-[10px] text-[#9AA5B5] px-1.5 py-0.5 rounded bg-[#1D232D] border border-[#303744]">
+                    {currentLangObj.name}
                   </span>
                 </div>
 
-                {/* Tile 4: Alex's Screen */}
-                <div className="relative rounded-lg overflow-hidden bg-[#121622] border border-sky-500/40 aspect-video flex items-center justify-center">
-                  <div className="w-full h-full bg-[#080B12] p-2 flex flex-col justify-center text-[8px] font-mono text-sky-400 leading-tight">
-                    <span className="text-slate-500">// DISPLAY 2</span>
-                    <span>mesh.subscribe(quorums)</span>
-                    <span className="text-emerald-400">READY (4 nodes)</span>
-                  </div>
-                  <div className="absolute top-1 left-1 bg-sky-500 text-slate-900 font-bold px-1 rounded text-[8px] font-mono">
-                    SCREEN
-                  </div>
-                  <div className="absolute bottom-1 left-1 bg-black/60 backdrop-blur-sm px-1.5 py-0.5 rounded text-[10px] text-white font-medium">
-                    Alex's Screen
-                  </div>
+                <div className="flex items-center space-x-2">
+                  {/* Compact Run Code / Live Preview Button */}
+                  {isPreviewMode ? (
+                    <button
+                      onClick={handleRunOrPreview}
+                      className="flex items-center space-x-1.5 px-3 py-1 rounded-lg bg-[#66D9C1]/15 hover:bg-[#66D9C1]/25 text-[#66D9C1] border border-[#66D9C1]/30 font-semibold text-xs transition-all shadow-sm"
+                      title="Preview HTML & CSS Live"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Live Preview</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleRunOrPreview}
+                      disabled={isExecuting}
+                      className="flex items-center space-x-1.5 px-3.5 py-1 rounded-lg bg-[#7C9CFF] hover:bg-[#688DFE] active:bg-[#5277E8] text-[#101318] font-bold text-xs transition-all shadow-md shadow-[#7C9CFF]/20 disabled:opacity-50"
+                      title={`Execute ${currentLangObj.name} in secure sandbox`}
+                    >
+                      {isExecuting ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Running...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                          <span>Run Code</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Toggle output console button */}
+                  {(executionResult || htmlPreviewDoc) && (
+                    <button
+                      onClick={() => setIsConsoleOpen(!isConsoleOpen)}
+                      className="p-1 rounded hover:bg-[#1D232D] text-[#9AA5B5] hover:text-[#F1F4F9]"
+                      title={isConsoleOpen ? 'Collapse Output' : 'Expand Output'}
+                    >
+                      {isConsoleOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                    </button>
+                  )}
                 </div>
               </div>
-            </div>
 
-            {/* Room Chat Section */}
-            <div className="flex-1 flex flex-col justify-between overflow-hidden bg-[#0A0D14]">
-              {/* Chat Stream Header */}
-              <div className="px-3 py-1.5 border-b border-[#1E2638] flex items-center justify-between text-[11px] font-mono text-slate-400">
-                <span className="text-slate-300 font-semibold">#CLUSTER-SYNC-STREAM</span>
-                <span className="text-sky-400">3 New</span>
+              {/* Monaco Editor Container */}
+              <div className="flex-1 relative overflow-hidden">
+                <Editor
+                  height="100%"
+                  path={activeFilePath}
+                  language={currentLangObj.monacoLanguage}
+                  theme="vs-dark"
+                  onMount={handleEditorDidMount}
+                  options={{
+                    fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+                    fontSize: 14,
+                    lineHeight: 22,
+                    lineNumbers: 'on',
+                    minimap: { enabled: true, side: 'right' },
+                    scrollBeyondLastLine: false,
+                    automaticLayout: true,
+                    padding: { top: 12, bottom: 12 },
+                    cursorBlinking: 'smooth',
+                    formatOnPaste: true,
+                    suggestOnTriggerCharacters: true,
+                  }}
+                />
               </div>
 
-              {/* Chat Message Stream */}
-              <div className="flex-1 p-3 overflow-y-auto space-y-3 text-xs">
-                {chatMessages.map((msg) => (
-                  <div key={msg.id} className="space-y-1">
-                    <div className="flex items-center space-x-1.5">
-                      <span className="font-semibold text-slate-200">{msg.senderName}</span>
-                      <span className="text-[10px] font-mono text-slate-500">{msg.time}</span>
-                      {msg.isYou && (
-                        <span className="text-[9px] font-mono px-1 rounded bg-sky-500/10 text-sky-400">
-                          You
+              {/* Collapsible Output Console / Live Preview Drawer */}
+              {isConsoleOpen && (
+                <div className="h-60 bg-[#171B22] border-t border-[#303744] flex flex-col font-mono text-xs select-none">
+                  {/* Console Header Bar */}
+                  <div className="h-9 px-3 bg-[#101318] border-b border-[#303744] flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <TerminalIcon className="w-3.5 h-3.5 text-[#7C9CFF]" />
+                      <span className="font-bold text-[#F1F4F9] text-xs">
+                        {isPreviewMode ? 'HTML / CSS Live Preview' : 'Execution Output'}
+                      </span>
+
+                      {/* Status Badges */}
+                      {isExecuting && (
+                        <span className="px-2 py-0.5 rounded-full bg-[#7C9CFF]/10 text-[#7C9CFF] border border-[#7C9CFF]/30 text-[10px] font-semibold flex items-center gap-1">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Running...
+                        </span>
+                      )}
+
+                      {!isExecuting && executionResult && (
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
+                            executionResult.success
+                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                              : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                          }`}
+                        >
+                          {executionResult.status || (executionResult.success ? 'Accepted' : 'Failed')}
+                        </span>
+                      )}
+
+                      {!isExecuting && executionResult?.time && (
+                        <span className="text-[10px] text-[#9AA5B5]">
+                          Time: {executionResult.time}
+                        </span>
+                      )}
+                      {!isExecuting && executionResult?.memory && (
+                        <span className="text-[10px] text-[#9AA5B5]">
+                          Memory: {executionResult.memory}
                         </span>
                       )}
                     </div>
-                    <div className={`p-2.5 rounded-lg text-xs leading-relaxed ${
-                      msg.isYou 
-                        ? 'bg-[#1E293B] text-slate-100 border border-sky-500/20' 
-                        : 'bg-[#121724] text-slate-300 border border-[#1A2234]'
-                    }`}>
-                      {msg.text}
-                      {msg.codeSnippet && (
-                        <div className="mt-1.5 p-1.5 rounded bg-[#090C12] border border-[#1E2638] font-mono text-[11px] text-sky-400 flex items-center justify-between">
-                          <code>{msg.codeSnippet}</code>
-                          <button 
-                            onClick={() => navigator.clipboard.writeText(msg.codeSnippet)} 
-                            title="Copy snippet" 
-                            className="text-slate-500 hover:text-white"
-                          >
-                            <Copy className="w-3 h-3" />
-                          </button>
-                        </div>
+
+                    <div className="flex items-center space-x-2">
+                      {isPreviewMode && (
+                        <button
+                          onClick={handleRunOrPreview}
+                          className="flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] text-[#66D9C1] hover:bg-[#1D232D]"
+                          title="Refresh Preview"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Refresh</span>
+                        </button>
                       )}
+                      <button
+                        onClick={() => {
+                          setExecutionResult(null);
+                          setHtmlPreviewDoc('');
+                        }}
+                        className="text-[11px] text-[#9AA5B5] hover:text-[#F1F4F9]"
+                        title="Clear console"
+                      >
+                        Clear
+                      </button>
+                      <button
+                        onClick={() => setIsConsoleOpen(false)}
+                        className="p-1 text-[#9AA5B5] hover:text-[#F1F4F9]"
+                        title="Close Console"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
-                ))}
-                <div ref={chatBottomRef} />
-              </div>
 
-              {/* Chat Input Bar */}
-              <form onSubmit={handleSendChat} className="p-2 border-t border-[#1E2638] bg-[#0E131F]">
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    placeholder="Message room or paste code..."
-                    className="w-full bg-[#080B12] border border-[#1E2638] focus:border-sky-500 rounded-lg pl-3 pr-20 py-2 text-xs text-white placeholder-slate-500 outline-none"
-                  />
-                  <div className="absolute right-2 top-2 flex items-center space-x-1.5 text-slate-400">
-                    <button
-                      type="button"
-                      onClick={() => setChatInput(p => p + ' `npm test`')}
-                      title="Insert code snippet"
-                      className="hover:text-sky-400"
-                    >
-                      <Code className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setChatInput(p => p + ' 🚀')}
-                      title="Insert emoji"
-                      className="hover:text-amber-400"
-                    >
-                      <Smile className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      type="submit"
-                      className="p-1 rounded bg-sky-500 text-white hover:bg-sky-400 transition-colors"
-                    >
-                      <Send className="w-3 h-3 stroke-[2.5]" />
-                    </button>
+                  {/* Console Body */}
+                  <div className="flex-1 p-3 overflow-y-auto font-mono text-xs select-text">
+                    {/* Live Preview Iframe for HTML/CSS */}
+                    {isPreviewMode ? (
+                      <div className="w-full h-full bg-white rounded-lg overflow-hidden shadow-inner">
+                        <iframe
+                          title="HTML Live Preview"
+                          srcDoc={htmlPreviewDoc}
+                          sandbox="allow-scripts"
+                          className="w-full h-full border-none"
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {isExecuting && (
+                          <div className="flex items-center space-x-2 text-[#7C9CFF] py-2">
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Compiling and executing in isolated sandbox...</span>
+                          </div>
+                        )}
+
+                        {!isExecuting && !executionResult && (
+                          <div className="text-[#9AA5B5]/60 italic py-2">
+                            Click "Run Code" above to compile and execute in a secure sandbox.
+                          </div>
+                        )}
+
+                        {!isExecuting && executionResult && (
+                          <div className="space-y-2">
+                            {/* Compilation Errors (C, C++, Java) */}
+                            {executionResult.compile_output && (
+                              <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/25 text-rose-300 whitespace-pre-wrap leading-relaxed">
+                                <div className="text-[10px] font-bold uppercase tracking-wider text-rose-400 mb-1">
+                                  COMPILATION ERROR:
+                                </div>
+                                {executionResult.compile_output}
+                              </div>
+                            )}
+
+                            {/* Standard Error / Runtime Exceptions */}
+                            {executionResult.stderr && (
+                              <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-300 whitespace-pre-wrap leading-relaxed">
+                                <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400 mb-1">
+                                  RUNTIME ERROR / STDERR:
+                                </div>
+                                {executionResult.stderr}
+                              </div>
+                            )}
+
+                            {/* Standard Output */}
+                            {executionResult.stdout && (
+                              <div className="text-[#F1F4F9] whitespace-pre-wrap leading-relaxed">
+                                {executionResult.stdout}
+                              </div>
+                            )}
+
+                            {/* No output message */}
+                            {!executionResult.stdout && !executionResult.stderr && !executionResult.compile_output && (
+                              <div className="text-[#9AA5B5] italic">
+                                [Program exited cleanly with status {executionResult.status} (no standard output generated)]
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
-              </form>
+              )}
+            </div>
+          ) : (
+            <WhiteboardView
+              roomId={roomId}
+              onBackToCode={() => setViewMode('code')}
+            />
+          )}
+        </main>
+
+        {/* Right Dock: Voice and Video Call Panel */}
+        <VideoCallPanel
+          localStream={localStream}
+          peerStreams={peerStreams}
+          activePeers={activePeers}
+          currentUser={currentUser}
+          isMuted={isMuted}
+          isCameraOff={isCameraOff}
+          isScreenSharing={isScreenSharing}
+          inCall={inCall}
+          callError={callError}
+          onStartCall={startCall}
+          onLeaveCall={leaveCall}
+          onToggleMute={toggleMute}
+          onToggleCamera={toggleCamera}
+          onToggleScreenShare={toggleScreenShare}
+          isCollapsed={isVideoCollapsed}
+          onToggleCollapse={() => setIsVideoCollapsed(!isVideoCollapsed)}
+        />
+      </div>
+
+      {/* Confirmation Modal for Language Change */}
+      {pendingLangChange && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-[#171B22] border border-[#303744] rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-4">
+            <div className="flex items-center space-x-3 text-amber-400">
+              <div className="w-10 h-10 rounded-full bg-amber-500/10 border border-amber-500/25 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-[#F1F4F9]">
+                  Change Language to {getLangObj(pendingLangChange).name}?
+                </h3>
+                <p className="text-xs text-[#9AA5B5]">Editor content will be reset</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-[#9AA5B5] leading-relaxed">
+              Changing the programming language will reset the editor to an empty document for all room participants.
+            </p>
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-[#303744]">
+              <button
+                onClick={() => setPendingLangChange(null)}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-[#9AA5B5] hover:text-[#F1F4F9] transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => applyLanguageChange(pendingLangChange)}
+                className="px-3.5 py-1.5 rounded-lg bg-[#7C9CFF] hover:bg-[#688DFE] text-[#101318] font-bold text-xs shadow-md shadow-[#7C9CFF]/20 transition-all"
+              >
+                Change & Clear Editor
+              </button>
             </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

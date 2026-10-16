@@ -1,79 +1,81 @@
 import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SocketProvider, useSocket } from './context/SocketContext';
-import { Navbar } from './components/layout/Navbar';
-import { Sidebar } from './components/layout/Sidebar';
-import { DashboardView } from './components/dashboard/DashboardView';
+import { HomePage } from './components/home/HomePage';
 import { WorkspaceView } from './components/workspace/WorkspaceView';
-import { ActiveCallsView } from './components/calls/ActiveCallsView';
-import { WhiteboardView } from './components/whiteboard/WhiteboardView';
-import { DocsView } from './components/docs/DocsView';
-import { AuthModal } from './components/modals/AuthModal';
-import { ProfileSettingsModal } from './components/modals/ProfileSettingsModal';
-import { RoomFullModal } from './components/modals/RoomFullModal';
+import { AlertTriangle } from 'lucide-react';
 
 const MainApp = () => {
   const { user } = useAuth();
   const { joinRoom, leaveRoom, roomFullError, setRoomFullError } = useSocket();
 
-  // Navigation tab: 'dashboard' | 'sessions' | 'workspace' | 'whiteboard' | 'docs'
-  const [currentTab, setCurrentTab] = useState('workspace');
   const [currentRoom, setCurrentRoom] = useState(null);
-  const [initialMediaState, setInitialMediaState] = useState({ isMuted: false, isCameraOff: false });
+  const [currentUser, setCurrentUser] = useState(null);
+  const [initialRoomCode, setInitialRoomCode] = useState('');
+  const [initialError, setInitialError] = useState('');
 
-  // Modals
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
-
-  // Initialize room based on URL query or default
+  // Handle URL invitation links on load
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const roomParam = params.get('room') || 'arch-review-cluster';
+    const roomParam = params.get('room');
 
-    const loadInitialRoom = async () => {
+    if (!roomParam) return;
+
+    setInitialRoomCode(roomParam);
+
+    const savedName = localStorage.getItem('cdt_display_name');
+    if (!savedName) {
+      // If no display name set, stay on HomePage with room pre-filled to prompt for name
+      return;
+    }
+
+    // Try joining with existing display name
+    const autoJoin = async () => {
       try {
-        const res = await fetch(`/api/rooms/${roomParam}`);
-        if (res.ok) {
-          const data = await res.json();
+        const res = await fetch(`/api/rooms/${roomParam}/join`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ displayName: savedName }),
+        });
+
+        const data = await res.json();
+        if (res.ok && data.room) {
           setCurrentRoom(data.room);
-          joinRoom(data.room.roomId, initialMediaState);
-          return;
+          setCurrentUser(data.user);
+          joinRoom(data.room.roomId, data.user);
+        } else {
+          setInitialError(data.message || 'Room could not be accessed.');
         }
       } catch (err) {
-        console.warn('Initial room load error:', err);
+        setInitialError('Failed to connect to room.');
       }
-
-      // Default room matching Screenshot 1
-      const fallbackRoom = {
-        roomId: 'arch-review-cluster',
-        slug: 'cdt-9921-v34',
-        name: 'arch-review-cluster',
-        language: 'TypeScript 5.4',
-        activeBranch: 'feat/cluster-sync',
-        checkpoint: 'v0.8.2',
-        maxCapacity: 10,
-        participants: [
-          { userId: 'usr_89f02c', name: 'Sarah Connor', avatar: 'SC', role: 'host' },
-          { userId: 'usr_marcus', name: 'Marcus Vance', avatar: 'MV' },
-          { userId: 'usr_priya', name: 'Priya Patel', avatar: 'PP' },
-          { userId: 'usr_alex', name: 'Alex Chen', avatar: 'AC' },
-        ],
-      };
-      setCurrentRoom(fallbackRoom);
-      joinRoom(fallbackRoom.roomId, initialMediaState);
     };
 
-    loadInitialRoom();
+    autoJoin();
   }, []);
 
-  // Enter room from dashboard or invite
-  const handleEnterRoom = (room, mediaState = { isMuted: false, isCameraOff: false }) => {
-    setCurrentRoom(room);
-    setInitialMediaState(mediaState);
-    joinRoom(room.roomId, mediaState);
-    setCurrentTab('workspace');
+  // When room is full, return to Home with message
+  useEffect(() => {
+    if (roomFullError) {
+      setCurrentRoom(null);
+      const url = new URL(window.location);
+      url.searchParams.delete('room');
+      window.history.pushState({}, '', url);
+    }
+  }, [roomFullError]);
 
-    // Update URL query without full reload
+  // Enter room from creation or join
+  const handleEnterRoom = (room, participantUser) => {
+    const activeUser = participantUser || user || {
+      id: `usr_${Math.random().toString(36).substring(2, 8)}`,
+      name: localStorage.getItem('cdt_display_name') || 'Developer',
+    };
+
+    setCurrentRoom(room);
+    setCurrentUser(activeUser);
+    joinRoom(room.roomId, activeUser);
+
+    // Update URL query
     const url = new URL(window.location);
     url.searchParams.set('room', room.roomId);
     window.history.pushState({}, '', url);
@@ -83,89 +85,58 @@ const MainApp = () => {
   const handleLeaveRoom = () => {
     if (currentRoom) {
       leaveRoom(currentRoom.roomId);
+      setCurrentRoom(null);
+      setCurrentUser(null);
     }
-    setCurrentTab('dashboard');
+    const url = new URL(window.location);
+    url.searchParams.delete('room');
+    window.history.pushState({}, '', url);
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0A0D14] text-slate-100 font-sans">
-      {/* Top Navbar */}
-      <Navbar
-        currentTab={currentTab}
-        setCurrentTab={setCurrentTab}
-        currentRoom={currentRoom}
-        onOpenSettings={() => setShowSettingsModal(true)}
-        onOpenAuth={() => setShowAuthModal(true)}
-      />
-
-      {/* Main View Area with Left Sidebar */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left Sidebar */}
-        <Sidebar
-          currentTab={currentTab}
-          setCurrentTab={setCurrentTab}
-          activeBranch={currentRoom?.activeBranch || 'feat/cluster-sync'}
+    <div className="min-h-screen bg-[#101318] text-[#F1F4F9] font-sans antialiased">
+      {/* Either show Workspace or HomePage */}
+      {currentRoom ? (
+        <WorkspaceView
+          currentRoom={currentRoom}
+          currentUser={currentUser}
+          onLeaveRoom={handleLeaveRoom}
         />
+      ) : (
+        <HomePage
+          onEnterRoom={handleEnterRoom}
+          initialRoomCode={initialRoomCode}
+          initialError={initialError || roomFullError || ''}
+        />
+      )}
 
-        {/* Dynamic Screen View */}
-        <main className="flex-1 flex flex-col overflow-hidden relative">
-          {currentTab === 'dashboard' && (
-            <DashboardView
-              onEnterRoom={handleEnterRoom}
-              setCurrentTab={setCurrentTab}
-            />
-          )}
-
-          {currentTab === 'workspace' && (
-            <WorkspaceView
-              currentRoom={currentRoom}
-              setCurrentTab={setCurrentTab}
-              onLeaveRoom={handleLeaveRoom}
-              initialMediaState={initialMediaState}
-            />
-          )}
-
-          {currentTab === 'sessions' && (
-            <ActiveCallsView
-              currentRoom={currentRoom}
-              setCurrentTab={setCurrentTab}
-              onLeaveRoom={handleLeaveRoom}
-            />
-          )}
-
-          {currentTab === 'whiteboard' && (
-            <WhiteboardView
-              currentRoom={currentRoom}
-              setCurrentTab={setCurrentTab}
-              onLeaveRoom={handleLeaveRoom}
-            />
-          )}
-
-          {currentTab === 'docs' && (
-            <DocsView />
-          )}
-        </main>
-      </div>
-
-      {/* Modals */}
-      <AuthModal
-        isOpen={showAuthModal}
-        onClose={() => setShowAuthModal(false)}
-      />
-
-      <ProfileSettingsModal
-        isOpen={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
-      />
-
-      <RoomFullModal
-        isOpen={!!roomFullError}
-        onClose={() => setRoomFullError(null)}
-        onReturnToDashboard={() => {
-          setRoomFullError(null);
-          setCurrentTab('dashboard');
-        }}
-      />
+      {/* Room Full Notification Modal */}
+      {roomFullError && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-[#171B22] border border-[#303744] rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-4">
+            <div className="flex items-center space-x-3 text-rose-400">
+              <div className="w-10 h-10 rounded-full bg-rose-500/10 border border-rose-500/20 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-[#F1F4F9]">Room is Full</h3>
+                <p className="text-xs text-[#9AA5B5]">Maximum 10 participants limit reached.</p>
+              </div>
+            </div>
+            <p className="text-xs text-[#9AA5B5] leading-relaxed">
+              This room has already reached its maximum capacity of 10 active peers. Please try another room or create a new session.
+            </p>
+            <div className="pt-2 border-t border-[#303744]">
+              <button
+                onClick={() => setRoomFullError(null)}
+                className="w-full py-2.5 rounded-xl bg-[#7C9CFF] hover:bg-[#688DFE] text-[#101318] font-bold text-xs transition-colors"
+              >
+                Back to Home
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

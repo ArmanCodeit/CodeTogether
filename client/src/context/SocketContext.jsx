@@ -8,10 +8,11 @@ export const SocketProvider = ({ children }) => {
   const { user } = useAuth();
   const [socket, setSocket] = useState(null);
   const [connected, setConnected] = useState(false);
-  const [latency, setLatency] = useState(18);
   const [activePeers, setActivePeers] = useState([]);
   const [roomFullError, setRoomFullError] = useState(null);
   const currentRoomRef = useRef(null);
+
+  const pendingJoinRef = useRef(null);
 
   useEffect(() => {
     const newSocket = io('/', {
@@ -22,17 +23,25 @@ export const SocketProvider = ({ children }) => {
 
     newSocket.on('connect', () => {
       setConnected(true);
-      console.log('[Socket] Connected to CodeTogether cluster mesh');
+      console.log('[Socket] Connected to signaling gateway');
+      if (pendingJoinRef.current) {
+        const { roomId, user: participant, mediaState } = pendingJoinRef.current;
+        newSocket.emit('join-room', {
+          roomId,
+          user: participant,
+          mediaState,
+        });
+      }
     });
 
     newSocket.on('disconnect', () => {
       setConnected(false);
-      console.log('[Socket] Disconnected from mesh');
+      console.log('[Socket] Disconnected from gateway');
     });
 
-    // Handle 10-peer maximum capacity rejection
+    // 10-peer maximum capacity rejection
     newSocket.on('room-full', (data) => {
-      console.warn('[Socket] Room full rejection:', data);
+      console.warn('[Socket] Room capacity limit reached:', data);
       setRoomFullError(data.message || 'Room has reached maximum capacity of 10 participants.');
     });
 
@@ -41,8 +50,8 @@ export const SocketProvider = ({ children }) => {
     });
 
     newSocket.on('user-joined', ({ peer }) => {
-      setActivePeers(prev => {
-        if (prev.some(p => p.userId === peer.userId || p.socketId === peer.socketId)) {
+      setActivePeers((prev) => {
+        if (prev.some((p) => p.userId === peer.userId || p.socketId === peer.socketId)) {
           return prev;
         }
         return [...prev, peer];
@@ -50,48 +59,43 @@ export const SocketProvider = ({ children }) => {
     });
 
     newSocket.on('user-left', ({ socketId, userId }) => {
-      setActivePeers(prev => prev.filter(p => p.socketId !== socketId && p.userId !== userId));
+      setActivePeers((prev) => prev.filter((p) => p.socketId !== socketId && p.userId !== userId));
+    });
+
+    newSocket.on('peer-media-changed', ({ socketId, mediaState }) => {
+      setActivePeers((prev) =>
+        prev.map((p) => (p.socketId === socketId ? { ...p, ...mediaState } : p))
+      );
     });
 
     setSocket(newSocket);
 
-    // Measure latency periodically
-    const latencyInterval = setInterval(() => {
-      if (newSocket.connected) {
-        const start = Date.now();
-        newSocket.emit('ping-check', () => {
-          const rtt = Math.max(8, Date.now() - start);
-          setLatency(rtt);
-        });
-        // Simulated realistic jitter between 14ms and 22ms if no explicit ack
-        setLatency(prev => {
-          const delta = (Math.random() * 4 - 2);
-          return Math.max(12, Math.min(28, Math.round(prev + delta)));
-        });
-      }
-    }, 4000);
-
     return () => {
-      clearInterval(latencyInterval);
       newSocket.disconnect();
     };
   }, []);
 
-  const joinRoom = (roomId, mediaState) => {
-    if (!socket || !user) return;
+  const joinRoom = (roomId, userOverride, mediaState) => {
+    const participant = userOverride || user;
+    if (!participant || !roomId) return;
+    pendingJoinRef.current = { roomId, user: participant, mediaState };
     currentRoomRef.current = roomId;
     setRoomFullError(null);
-    socket.emit('join-room', {
-      roomId,
-      user,
-      mediaState,
-    });
+    if (socket && socket.connected) {
+      socket.emit('join-room', {
+        roomId,
+        user: participant,
+        mediaState,
+      });
+    }
   };
 
   const leaveRoom = (roomId) => {
-    if (!socket) return;
+    pendingJoinRef.current = null;
     currentRoomRef.current = null;
-    socket.emit('leave-room', { roomId });
+    if (socket) {
+      socket.emit('leave-room', { roomId });
+    }
     setActivePeers([]);
   };
 
@@ -100,7 +104,6 @@ export const SocketProvider = ({ children }) => {
       value={{
         socket,
         connected,
-        latency,
         activePeers,
         setActivePeers,
         roomFullError,

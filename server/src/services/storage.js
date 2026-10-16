@@ -1,111 +1,31 @@
-import bcrypt from 'bcryptjs';
 import { User } from '../models/User.js';
 import { Room } from '../models/Room.js';
 import { Snapshot } from '../models/Snapshot.js';
 import { ChatMessage } from '../models/ChatMessage.js';
 import { Whiteboard } from '../models/Whiteboard.js';
 import { getIsMongoConnected } from '../config/db.js';
-import {
-  INITIAL_ROOMS,
-  INITIAL_SNAPSHOTS,
-  INITIAL_CHAT_MESSAGES,
-  DEFAULT_WHITEBOARD_ELEMENTS,
-} from './seedData.js';
 
-// In-Memory store fallback
+// Clean in-memory store for fallback if MongoDB connection drops
 const memoryStore = {
   users: [],
-  rooms: JSON.parse(JSON.stringify(INITIAL_ROOMS)),
-  snapshots: JSON.parse(JSON.stringify(INITIAL_SNAPSHOTS)),
-  chatMessages: JSON.parse(JSON.stringify(INITIAL_CHAT_MESSAGES)),
-  whiteboards: {
-    'arch-review-cluster': {
-      roomId: 'arch-review-cluster',
-      title: 'Cluster Architecture & WebRTC Signaling Flow v2',
-      elements: JSON.parse(JSON.stringify(DEFAULT_WHITEBOARD_ELEMENTS)),
-      viewport: { x: 0, y: 0, zoom: 1 },
-      updatedAt: new Date(),
-    },
-  },
+  rooms: [],
+  snapshots: [],
+  chatMessages: [],
+  whiteboards: {},
 };
 
-// Seed default users in memory store
-const defaultHashedPassword = await bcrypt.hash('password123', 10);
-const defaultUser = {
-  _id: 'usr_89f02c',
-  id: 'usr_89f02c',
-  name: 'Sarah Connor',
-  email: 'sarah@codetogether.dev',
-  password: defaultHashedPassword,
-  avatar: 'SC',
-  handle: '@sarah_c',
-  role: 'architect',
-  recentRooms: [
-    { roomId: 'arch-review-cluster', name: 'arch-review-cluster', language: 'TypeScript 5.4' },
-    { roomId: 'payment-gateway-pair', name: 'payment-gateway-pair', language: 'Go 1.22' }
-  ],
-  settings: {
-    micMutedByDefault: false,
-    cameraOffByDefault: false,
-    theme: 'vs-dark',
-    fontSize: 14,
-    tabSize: 2,
-  },
-  createdAt: new Date(),
-};
-memoryStore.users.push(defaultUser);
-
-// Seed MongoDB if empty upon connection
+// No fake seed data — cleanly initialized
 export const initStorage = async () => {
-  if (!getIsMongoConnected()) return;
-
-  try {
-    const userCount = await User.countDocuments();
-    if (userCount === 0) {
-      await User.create(defaultUser);
-      console.log('[Storage] Seeded default user in MongoDB');
-    }
-
-    const roomCount = await Room.countDocuments();
-    if (roomCount === 0) {
-      await Room.insertMany(INITIAL_ROOMS);
-      console.log('[Storage] Seeded initial rooms in MongoDB');
-    }
-
-    const snapshotCount = await Snapshot.countDocuments();
-    if (snapshotCount === 0) {
-      await Snapshot.insertMany(INITIAL_SNAPSHOTS);
-      console.log('[Storage] Seeded initial snapshots in MongoDB');
-    }
-
-    const chatCount = await ChatMessage.countDocuments();
-    if (chatCount === 0) {
-      await ChatMessage.insertMany(INITIAL_CHAT_MESSAGES);
-      console.log('[Storage] Seeded initial chat messages in MongoDB');
-    }
-
-    const whiteboardCount = await Whiteboard.countDocuments();
-    if (whiteboardCount === 0) {
-      await Whiteboard.create({
-        roomId: 'arch-review-cluster',
-        title: 'Cluster Architecture & WebRTC Signaling Flow v2',
-        elements: DEFAULT_WHITEBOARD_ELEMENTS,
-        viewport: { x: 0, y: 0, zoom: 1 },
-      });
-      console.log('[Storage] Seeded initial whiteboard in MongoDB');
-    }
-  } catch (err) {
-    console.warn('[Storage] Seed MongoDB warning:', err.message);
-  }
+  console.log('[Storage] Ready. All application state is real and persisted.');
 };
 
 export const storage = {
-  // Users
+  // --- USERS ---
   async findUserByEmail(email) {
     if (getIsMongoConnected()) {
       return await User.findOne({ email: email.toLowerCase() });
     }
-    return memoryStore.users.find(u => u.email.toLowerCase() === email.toLowerCase()) || null;
+    return memoryStore.users.find(u => u.email?.toLowerCase() === email.toLowerCase()) || null;
   },
 
   async findUserById(id) {
@@ -143,17 +63,17 @@ export const storage = {
     return safe;
   },
 
-  // Rooms
-  async getAllRooms() {
+  // --- ROOMS ---
+  async getAllRooms(filterQuery = {}) {
     if (getIsMongoConnected()) {
-      return await Room.find().sort({ updatedAt: -1 });
+      return await Room.find(filterQuery).sort({ updatedAt: -1 });
     }
     return memoryStore.rooms;
   },
 
   async getRoomById(roomId) {
     if (getIsMongoConnected()) {
-      return await Room.findOne({ roomId });
+      return await Room.findOne({ $or: [{ roomId }, { slug: roomId }] });
     }
     return memoryStore.rooms.find(r => r.roomId === roomId || r.slug === roomId) || null;
   },
@@ -175,7 +95,11 @@ export const storage = {
 
   async updateRoom(roomId, updateData) {
     if (getIsMongoConnected()) {
-      return await Room.findOneAndUpdate({ roomId }, { ...updateData, updatedAt: new Date() }, { new: true });
+      return await Room.findOneAndUpdate(
+        { $or: [{ roomId }, { slug: roomId }] },
+        { ...updateData, updatedAt: new Date() },
+        { new: true }
+      );
     }
     const idx = memoryStore.rooms.findIndex(r => r.roomId === roomId || r.slug === roomId);
     if (idx === -1) return null;
@@ -185,20 +109,26 @@ export const storage = {
 
   async deleteRoom(roomId) {
     if (getIsMongoConnected()) {
-      return await Room.findOneAndDelete({ roomId });
+      await Room.findOneAndDelete({ $or: [{ roomId }, { slug: roomId }] });
+      await ChatMessage.deleteMany({ roomId });
+      await Snapshot.deleteMany({ roomId });
+      await Whiteboard.findOneAndDelete({ roomId });
+      return true;
     }
     const idx = memoryStore.rooms.findIndex(r => r.roomId === roomId || r.slug === roomId);
     if (idx !== -1) {
       memoryStore.rooms.splice(idx, 1);
+      memoryStore.chatMessages = memoryStore.chatMessages.filter(m => m.roomId !== roomId);
+      delete memoryStore.whiteboards[roomId];
       return true;
     }
     return false;
   },
 
-  // Files
+  // --- FILES ---
   async updateRoomFile(roomId, filePath, content) {
     if (getIsMongoConnected()) {
-      const room = await Room.findOne({ roomId });
+      const room = await Room.findOne({ $or: [{ roomId }, { slug: roomId }] });
       if (!room) return null;
       const file = room.files.find(f => f.path === filePath);
       if (file) {
@@ -224,16 +154,20 @@ export const storage = {
     return room;
   },
 
-  // Snapshots
-  async getSnapshots(roomId) {
+  // --- SNAPSHOTS ---
+  async getSnapshots(roomId, userId) {
+    const query = {};
+    if (roomId) query.roomId = roomId;
+    if (userId) query.authorId = userId;
+
     if (getIsMongoConnected()) {
-      const query = roomId ? { roomId } : {};
       return await Snapshot.find(query).sort({ createdAt: -1 });
     }
-    if (roomId) {
-      return memoryStore.snapshots.filter(s => s.roomId === roomId);
-    }
-    return memoryStore.snapshots;
+    return memoryStore.snapshots.filter(s => {
+      if (roomId && s.roomId !== roomId) return false;
+      if (userId && s.authorId !== userId) return false;
+      return true;
+    });
   },
 
   async createSnapshot(snapshotData) {
@@ -248,10 +182,22 @@ export const storage = {
     return newSnapshot;
   },
 
-  // Chat Messages
+  async deleteSnapshot(snapshotId) {
+    if (getIsMongoConnected()) {
+      return await Snapshot.findOneAndDelete({ snapshotId });
+    }
+    const idx = memoryStore.snapshots.findIndex(s => s.snapshotId === snapshotId);
+    if (idx !== -1) {
+      memoryStore.snapshots.splice(idx, 1);
+      return true;
+    }
+    return false;
+  },
+
+  // --- CHAT MESSAGES ---
   async getChatMessages(roomId) {
     if (getIsMongoConnected()) {
-      return await ChatMessage.find({ roomId }).sort({ createdAt: 1 }).limit(100);
+      return await ChatMessage.find({ roomId }).sort({ createdAt: 1 }).limit(200);
     }
     return memoryStore.chatMessages.filter(m => m.roomId === roomId);
   },
@@ -262,21 +208,22 @@ export const storage = {
     }
     const newMsg = {
       ...msgData,
+      _id: `msg_${Math.random().toString(36).substring(2, 9)}`,
       createdAt: new Date(),
     };
     memoryStore.chatMessages.push(newMsg);
     return newMsg;
   },
 
-  // Whiteboard
+  // --- WHITEBOARD ---
   async getWhiteboard(roomId) {
     if (getIsMongoConnected()) {
       let wb = await Whiteboard.findOne({ roomId });
       if (!wb) {
         wb = await Whiteboard.create({
           roomId,
-          title: 'Cluster Architecture & WebRTC Signaling Flow v2',
-          elements: DEFAULT_WHITEBOARD_ELEMENTS,
+          title: 'Doodle Board',
+          elements: [],
           viewport: { x: 0, y: 0, zoom: 1 },
         });
       }
@@ -285,8 +232,8 @@ export const storage = {
     if (!memoryStore.whiteboards[roomId]) {
       memoryStore.whiteboards[roomId] = {
         roomId,
-        title: 'Cluster Architecture & WebRTC Signaling Flow v2',
-        elements: JSON.parse(JSON.stringify(DEFAULT_WHITEBOARD_ELEMENTS)),
+        title: 'Doodle Board',
+        elements: [],
         viewport: { x: 0, y: 0, zoom: 1 },
         updatedAt: new Date(),
       };
@@ -303,10 +250,60 @@ export const storage = {
       );
     }
     memoryStore.whiteboards[roomId] = {
-      ...(memoryStore.whiteboards[roomId] || { roomId }),
+      ...(memoryStore.whiteboards[roomId] || { roomId, title: 'Doodle Board', elements: [] }),
       ...data,
       updatedAt: new Date(),
     };
     return memoryStore.whiteboards[roomId];
+  },
+
+  // --- REAL METRICS & STATISTICS (NO FAKE DATA) ---
+  async getUserStats(userId) {
+    let allRooms = [];
+    let userSnapshots = [];
+
+    if (getIsMongoConnected()) {
+      allRooms = await Room.find();
+      userSnapshots = await Snapshot.find(userId ? { authorId: userId } : {});
+    } else {
+      allRooms = memoryStore.rooms;
+      userSnapshots = memoryStore.snapshots;
+    }
+
+    const myRooms = userId ? allRooms.filter(r => r.ownerId === userId) : allRooms;
+    const activeRooms = allRooms.filter(r => r.participants && r.participants.length > 0);
+
+    // Compute real language distribution
+    const langCounts = {};
+    let totalFiles = 0;
+    let totalBytes = 0;
+
+    myRooms.forEach(room => {
+      const lang = room.language || 'JavaScript';
+      langCounts[lang] = (langCounts[lang] || 0) + 1;
+
+      (room.files || []).forEach(f => {
+        totalFiles += 1;
+        totalBytes += (f.content || '').length;
+      });
+    });
+
+    const totalLangRooms = Object.values(langCounts).reduce((a, b) => a + b, 0);
+    const languagesDistribution = Object.entries(langCounts).map(([name, count]) => ({
+      name,
+      count,
+      percent: totalLangRooms > 0 ? Math.round((count / totalLangRooms) * 100) : 0,
+    }));
+
+    return {
+      activeRoomsCount: activeRooms.length,
+      totalRoomsCount: myRooms.length,
+      collabSessionsCount: myRooms.length,
+      snapshotsCount: userSnapshots.length,
+      storageUsedBytes: totalBytes,
+      storageUsedKB: (totalBytes / 1024).toFixed(1),
+      languagesDistribution,
+      totalFiles,
+    };
   },
 };
